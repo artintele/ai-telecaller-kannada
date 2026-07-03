@@ -100,10 +100,11 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
         params=GoogleLLMService.InputParams(temperature=0.4),
     )
 
-    speaker = (campaign or {}).get("SARVAM_TTS_SPEAKER") or os.getenv("SARVAM_TTS_SPEAKER", "anushka")
+    speaker = (campaign or {}).get("SARVAM_TTS_SPEAKER") or os.getenv("SARVAM_TTS_SPEAKER", "kavya")
+    tts_model = (campaign or {}).get("SARVAM_TTS_MODEL") or os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
     tts = SarvamTTSService(
         api_key=os.getenv("SARVAM_API_KEY"),
-        model=os.getenv("SARVAM_TTS_MODEL", "bulbul:v2"),
+        model=tts_model,
         voice_id=speaker,
         sample_rate=TWILIO_SAMPLE_RATE,
         params=SarvamTTSService.InputParams(
