@@ -125,9 +125,9 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
         )
         settings_kwargs = dict(
             voice=os.getenv("GEMINI_VOICE", "Aoede"),
-            # The service defaults to language "en-US" — Gemini's server-side speech
-            # handling must know the caller speaks Kannada.
-            language="kn-IN",
+            # NOTE: do NOT set language here. Native-audio Live models auto-detect the
+            # spoken language and hard-reject an explicit code (websocket 1007
+            # "Unsupported language code 'kn-IN'" — verified on a live call 2026-07-03).
             # Server-side VAD owns end-of-turn in Live mode; make it call turns fast.
             vad=GeminiVADParams(
                 end_sensitivity=EndSensitivity.END_SENSITIVITY_HIGH,
