@@ -159,22 +159,31 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     # Captures both sides of the conversation and streams it to the demo dashboard.
     transcript = TranscriptProcessor()
 
-    stages = [transport.input()]        # Twilio -> frames
-    if voice_engine != "gemini-direct":
-        stages.append(stt)              # speech -> text (skipped in direct mode: Gemini hears raw audio)
-    stages += [
-        transcript.user(),              # capture customer turn
-        aggregator.user(),              # add user turn to context
-        llm,                            # Gemini brain (text->text, or audio in/out in Live modes)
-    ]
-    if tts is not None:
-        stages.append(tts)      # text -> speech (Sarvam Bulbul) — sarvam mode only
-    stages += [
-        transport.output(),     # frames -> Twilio
-        aggregator.assistant(), # add bot turn to context
-        transcript.assistant(), # capture agent turn
-    ]
-    pipeline = Pipeline(stages)
+    if voice_engine == "gemini-direct":
+        # Minimal path: raw audio -> Gemini Live -> raw audio. NO local turn detection —
+        # Gemini's server-side VAD decides turn ends in ~ms. Our aggregator's turn
+        # strategies expect STT transcriptions and add ~9s of timeout lag without them.
+        pipeline = Pipeline([
+            transport.input(),   # Twilio audio in
+            llm,                 # Gemini Live: hears + thinks + speaks
+            transport.output(),  # Twilio audio out
+        ])
+    else:
+        stages = [
+            transport.input(),      # Twilio -> frames
+            stt,                    # speech -> text (Kannada/Kanglish)
+            transcript.user(),      # capture customer turn
+            aggregator.user(),      # add user turn to context
+            llm,                    # Gemini brain (text->text, or text->audio in Live mode)
+        ]
+        if tts is not None:
+            stages.append(tts)      # text -> speech (Sarvam Bulbul) — sarvam mode only
+        stages += [
+            transport.output(),     # frames -> Twilio
+            aggregator.assistant(), # add bot turn to context
+            transcript.assistant(), # capture agent turn
+        ]
+        pipeline = Pipeline(stages)
 
     @transcript.event_handler("on_transcript_update")
     async def _on_transcript(_proc, frame):
