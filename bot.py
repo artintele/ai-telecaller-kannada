@@ -11,8 +11,10 @@ target pipecat-ai ~0.0.95. If an import fails after `pip install`, run
 `python -c "import pipecat.services.sarvam.tts"` etc. and adjust to your installed version.
 """
 
+import asyncio
 import json
 import os
+import wave
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -20,6 +22,14 @@ from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.frames.frames import (
+    InterruptionFrame,
+    TTSAudioRawFrame,
+    TTSStartedFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
+)
+from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -48,6 +58,66 @@ TWILIO_SAMPLE_RATE = 8000
 # Per-call debug log: pipecat logs TTFB metrics + turn events here so latency
 # can be measured from real timestamps instead of guessed.
 logger.add(BASE_DIR / "logs" / "call_debug.log", level="DEBUG", rotation="20 MB", retention=3)
+
+FILLERS_DIR = BASE_DIR / "assets" / "fillers"
+
+
+def load_filler_clips() -> list[bytes]:
+    """Load pre-generated 8kHz PCM filler clips (Aoede voice, via Gemini TTS)."""
+    clips = []
+    if FILLERS_DIR.is_dir():
+        for path in sorted(FILLERS_DIR.glob("*.wav")):
+            with wave.open(str(path), "rb") as w:
+                clips.append(w.readframes(w.getnframes()))
+    return clips
+
+
+class FillerInjector(FrameProcessor):
+    """Speak a short pre-recorded acknowledgment while Gemini is still thinking.
+
+    Gemini Live's TTFB is bimodal (measured: 0.2-1s usually, but 6-12s outliers).
+    When the caller stops talking and no bot audio has arrived within `delay`
+    seconds, this pushes one filler clip (bot's own voice) so the line never
+    feels dead. Cancelled instantly if the real answer arrives first, if the
+    caller resumes speaking, or on interruption.
+    """
+
+    def __init__(self, clips: list[bytes], delay: float = 0.6, sample_rate: int = 8000):
+        super().__init__()
+        self._clips = clips
+        self._delay = delay
+        self._sample_rate = sample_rate
+        self._filler_task = None
+        self._next_clip = 0
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, VADUserStoppedSpeakingFrame) and self._clips:
+            await self._cancel_pending()
+            self._filler_task = self.create_task(self._play_filler_after_delay())
+        elif isinstance(
+            frame, (TTSStartedFrame, TTSAudioRawFrame, VADUserStartedSpeakingFrame, InterruptionFrame)
+        ):
+            await self._cancel_pending()
+        await self.push_frame(frame, direction)
+
+    async def _cancel_pending(self):
+        if self._filler_task:
+            task, self._filler_task = self._filler_task, None
+            await self.cancel_task(task)
+
+    async def _play_filler_after_delay(self):
+        await asyncio.sleep(self._delay)
+        self._filler_task = None
+        pcm = self._clips[self._next_clip % len(self._clips)]
+        self._next_clip += 1
+        chunk = int(self._sample_rate * 2 * 0.2)  # 200ms chunks so barge-in clears fast
+        for i in range(0, len(pcm), chunk):
+            await self.push_frame(
+                TTSAudioRawFrame(
+                    audio=pcm[i : i + chunk], sample_rate=self._sample_rate, num_channels=1
+                )
+            )
 
 
 def build_system_instruction(campaign: dict | None = None) -> str:
@@ -88,7 +158,9 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
             audio_in_enabled=True,
             audio_out_enabled=True,
             add_wav_header=False,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.5)),  # turn-taking + barge-in; 0.5s end-of-turn for snappier replies
+            # stop_secs: end-of-turn wait; start_secs 0.2->0.12 so barge-in
+            # (interruption broadcast + Twilio buffer clear) fires near-instantly.
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.5, start_secs=0.12)),
             serializer=serializer,
         ),
     )
@@ -119,9 +191,9 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
             "\n\n## VOICE MODE NOTE\nYou are speaking with your OWN voice (native audio, no TTS). "
             "Ignore all script-formatting rules in section 3 about Kannada script vs Latin — just "
             "SPEAK naturally in casual Bengaluru Kanglish (spoken Kannada mixed with English words), "
-            "warm and human, short turns. Begin every reply with a quick, natural spoken filler "
-            "('Haan', 'Hmm', 'Okay okay', 'Sari sari', 'Ah correct') BEFORE the substance — it makes "
-            "the conversation feel instant."
+            "warm and human, short turns. The phone system sometimes plays a short 'Hmm'/'Okay' "
+            "acknowledgment in your voice before your reply reaches the caller — so do NOT open "
+            "with long filler phrases yourself; get to the substance quickly and naturally."
         )
         settings_kwargs = dict(
             voice=os.getenv("GEMINI_VOICE", "Aoede"),
@@ -225,6 +297,8 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     # Captures both sides of the conversation and streams it to the demo dashboard.
     transcript = TranscriptProcessor()
 
+    filler = FillerInjector(clips=load_filler_clips(), delay=0.6)
+
     if voice_engine == "gemini-direct":
         # Raw audio -> Gemini Live -> raw audio. The aggregator MUST be in the path (it
         # converts LLMRunFrame/turn-ends into generation triggers — without it Gemini
@@ -233,6 +307,7 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
             transport.input(),      # Twilio audio in
             aggregator.user(),      # fast VAD-based turn trigger
             llm,                    # Gemini Live: hears + thinks + speaks
+            filler,                 # covers slow-TTFB turns with a spoken "Hmm"/"Okay"
             transport.output(),     # Twilio audio out
             aggregator.assistant(), # context bookkeeping
         ])
@@ -246,6 +321,8 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
         ]
         if tts is not None:
             stages.append(tts)      # text -> speech (Sarvam Bulbul) — sarvam mode only
+        else:
+            stages.append(filler)   # gemini mode: cover slow Live TTFB turns
         stages += [
             transport.output(),     # frames -> Twilio
             aggregator.assistant(), # add bot turn to context
