@@ -94,48 +94,84 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
         params=SarvamSTTService.InputParams(language=Language.KN_IN),
     )
 
-    llm = GoogleLLMService(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-        params=GoogleLLMService.InputParams(temperature=0.4),
-    )
+    # VOICE_ENGINE toggle:
+    #   "sarvam" (default) -> Gemini text LLM + Sarvam Bulbul TTS
+    #   "gemini"           -> Gemini Live native audio (speaks directly, like the Gemini app;
+    #                         no TTS stage; Sarvam STT still feeds it the caller's words)
+    voice_engine = (campaign or {}).get("VOICE_ENGINE") or os.getenv("VOICE_ENGINE", "sarvam")
 
-    speaker = (campaign or {}).get("SARVAM_TTS_SPEAKER") or os.getenv("SARVAM_TTS_SPEAKER", "kavya")
-    tts_model = (campaign or {}).get("SARVAM_TTS_MODEL") or os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
-    tts = SarvamTTSService(
-        api_key=os.getenv("SARVAM_API_KEY"),
-        model=tts_model,
-        voice_id=speaker,
-        sample_rate=TWILIO_SAMPLE_RATE,
-        params=SarvamTTSService.InputParams(
-            language=Language.KN_IN,
-            pace=1.05,
-            pitch=0.0,
-            loudness=1.0,
-        ),
-    )
+    tts = None
+    if voice_engine == "gemini":
+        from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 
-    # Conversation context seeded with the dialect system instruction.
-    from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+        gemini_voice_note = (
+            "\n\n## VOICE MODE NOTE\nYou are speaking with your OWN voice (native audio, no TTS). "
+            "Ignore all script-formatting rules in section 3 about Kannada script vs Latin — just "
+            "SPEAK naturally in casual Bengaluru Kanglish (spoken Kannada mixed with English words), "
+            "warm and human, short turns."
+        )
+        llm = GeminiLiveLLMService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            model=os.getenv("GEMINI_LIVE_MODEL") or None,  # None -> pipecat's default native-audio model
+            voice_id=os.getenv("GEMINI_VOICE", "Aoede"),
+            system_instruction=build_system_instruction(campaign) + gemini_voice_note,
+        )
+    else:
+        llm = GoogleLLMService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            params=GoogleLLMService.InputParams(temperature=0.4),
+        )
+        speaker = (campaign or {}).get("SARVAM_TTS_SPEAKER") or os.getenv("SARVAM_TTS_SPEAKER", "kavya")
+        tts_model = (campaign or {}).get("SARVAM_TTS_MODEL") or os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
+        tts = SarvamTTSService(
+            api_key=os.getenv("SARVAM_API_KEY"),
+            model=tts_model,
+            voice_id=speaker,
+            sample_rate=TWILIO_SAMPLE_RATE,
+            params=SarvamTTSService.InputParams(
+                language=Language.KN_IN,
+                pace=1.05,
+                pitch=0.0,
+                loudness=1.0,
+            ),
+        )
 
-    messages = [{"role": "system", "content": build_system_instruction(campaign)}]
-    context = OpenAILLMContext(messages)
-    aggregator = llm.create_context_aggregator(context)
+    # Conversation context. Gemini Live uses the universal context API (its old-style
+    # aggregator path is broken in pipecat 0.0.108); the big system prompt goes in via
+    # system_instruction. Sarvam mode keeps the proven OpenAILLMContext path.
+    messages = []
+    if voice_engine == "gemini":
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+
+        context = LLMContext()
+        aggregator = LLMContextAggregatorPair(context)
+    else:
+        from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+
+        messages = [{"role": "system", "content": build_system_instruction(campaign)}]
+        context = OpenAILLMContext(messages)
+        aggregator = llm.create_context_aggregator(context)
 
     # Captures both sides of the conversation and streams it to the demo dashboard.
     transcript = TranscriptProcessor()
 
-    pipeline = Pipeline([
+    stages = [
         transport.input(),      # Twilio -> frames
         stt,                    # speech -> text (Kannada/Kanglish)
         transcript.user(),      # capture customer turn
         aggregator.user(),      # add user turn to context
-        llm,                    # Gemini brain
-        tts,                    # text -> speech (Sarvam Bulbul)
+        llm,                    # Gemini brain (text->text, or text->AUDIO in gemini voice mode)
+    ]
+    if tts is not None:
+        stages.append(tts)      # text -> speech (Sarvam Bulbul) — sarvam mode only
+    stages += [
         transport.output(),     # frames -> Twilio
         aggregator.assistant(), # add bot turn to context
         transcript.assistant(), # capture agent turn
-    ])
+    ]
+    pipeline = Pipeline(stages)
 
     @transcript.event_handler("on_transcript_update")
     async def _on_transcript(_proc, frame):
@@ -159,12 +195,17 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     # Speak the opening line the moment the call connects.
     @transport.event_handler("on_client_connected")
     async def _on_connect(_transport, _client):
-        await hub.publish({"type": "status", "status": "in-call"})
-        messages.append({
-            "role": "system",
-            "content": "The call just connected. Speak your FIRST LINE now, warmly, in Bengaluru Kanglish.",
-        })
-        await task.queue_frames([aggregator.user().get_context_frame()])
+        await hub.publish({"type": "status", "status": f"in-call ({voice_engine} voice)"})
+        if voice_engine == "gemini":
+            from pipecat.frames.frames import LLMRunFrame
+
+            await task.queue_frames([LLMRunFrame()])
+        else:
+            messages.append({
+                "role": "system",
+                "content": "The call just connected. Speak your FIRST LINE now, warmly, in Bengaluru Kanglish.",
+            })
+            await task.queue_frames([aggregator.user().get_context_frame()])
 
     @transport.event_handler("on_client_disconnected")
     async def _on_disconnect(_transport, _client):
