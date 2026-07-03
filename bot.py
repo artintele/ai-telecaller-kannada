@@ -18,6 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -82,7 +83,7 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
             audio_in_enabled=True,
             audio_out_enabled=True,
             add_wav_header=False,
-            vad_analyzer=SileroVADAnalyzer(),  # handles turn-taking + barge-in
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.5)),  # turn-taking + barge-in; 0.5s end-of-turn for snappier replies
             serializer=serializer,
         ),
     )
@@ -95,13 +96,14 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     )
 
     # VOICE_ENGINE toggle:
-    #   "sarvam" (default) -> Gemini text LLM + Sarvam Bulbul TTS
-    #   "gemini"           -> Gemini Live native audio (speaks directly, like the Gemini app;
-    #                         no TTS stage; Sarvam STT still feeds it the caller's words)
+    #   "sarvam"        -> Gemini text LLM + Sarvam Bulbul TTS
+    #   "gemini"        -> Sarvam STT -> Gemini Live native audio (no TTS stage)
+    #   "gemini-direct" -> caller audio straight to Gemini Live (no STT, no TTS — lowest
+    #                      latency; Gemini hears and speaks Kannada natively)
     voice_engine = (campaign or {}).get("VOICE_ENGINE") or os.getenv("VOICE_ENGINE", "sarvam")
 
     tts = None
-    if voice_engine == "gemini":
+    if voice_engine.startswith("gemini"):
         from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 
         gemini_voice_note = (
@@ -141,7 +143,7 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     # aggregator path is broken in pipecat 0.0.108); the big system prompt goes in via
     # system_instruction. Sarvam mode keeps the proven OpenAILLMContext path.
     messages = []
-    if voice_engine == "gemini":
+    if voice_engine.startswith("gemini"):
         from pipecat.processors.aggregators.llm_context import LLMContext
         from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 
@@ -157,12 +159,13 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     # Captures both sides of the conversation and streams it to the demo dashboard.
     transcript = TranscriptProcessor()
 
-    stages = [
-        transport.input(),      # Twilio -> frames
-        stt,                    # speech -> text (Kannada/Kanglish)
-        transcript.user(),      # capture customer turn
-        aggregator.user(),      # add user turn to context
-        llm,                    # Gemini brain (text->text, or text->AUDIO in gemini voice mode)
+    stages = [transport.input()]        # Twilio -> frames
+    if voice_engine != "gemini-direct":
+        stages.append(stt)              # speech -> text (skipped in direct mode: Gemini hears raw audio)
+    stages += [
+        transcript.user(),              # capture customer turn
+        aggregator.user(),              # add user turn to context
+        llm,                            # Gemini brain (text->text, or audio in/out in Live modes)
     ]
     if tts is not None:
         stages.append(tts)      # text -> speech (Sarvam Bulbul) — sarvam mode only
@@ -196,7 +199,7 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     @transport.event_handler("on_client_connected")
     async def _on_connect(_transport, _client):
         await hub.publish({"type": "status", "status": f"in-call ({voice_engine} voice)"})
-        if voice_engine == "gemini":
+        if voice_engine.startswith("gemini"):
             from pipecat.frames.frames import LLMRunFrame
 
             await task.queue_frames([LLMRunFrame()])
