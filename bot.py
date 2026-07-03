@@ -145,10 +145,29 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     messages = []
     if voice_engine.startswith("gemini"):
         from pipecat.processors.aggregators.llm_context import LLMContext
-        from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+        from pipecat.processors.aggregators.llm_response_universal import (
+            LLMContextAggregatorPair,
+            LLMUserAggregatorParams,
+        )
+        from pipecat.turns.user_start.vad_user_turn_start_strategy import VADUserTurnStartStrategy
+        from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import (
+            SpeechTimeoutUserTurnStopStrategy,
+        )
+        from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
         context = LLMContext()
-        aggregator = LLMContextAggregatorPair(context)
+        # Default turn-stop strategies expect STT transcriptions / a turn-analyzer model and
+        # add ~9s of dead air in audio-native mode. Pure VAD timing: turn ends 0.2s after
+        # the VAD says speech stopped (VAD itself waits stop_secs=0.5) -> ~0.7s + model TTFB.
+        aggregator = LLMContextAggregatorPair(
+            context,
+            user_params=LLMUserAggregatorParams(
+                user_turn_strategies=UserTurnStrategies(
+                    start=[VADUserTurnStartStrategy()],
+                    stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.2)],
+                ),
+            ),
+        )
     else:
         from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 
@@ -160,13 +179,15 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     transcript = TranscriptProcessor()
 
     if voice_engine == "gemini-direct":
-        # Minimal path: raw audio -> Gemini Live -> raw audio. NO local turn detection —
-        # Gemini's server-side VAD decides turn ends in ~ms. Our aggregator's turn
-        # strategies expect STT transcriptions and add ~9s of timeout lag without them.
+        # Raw audio -> Gemini Live -> raw audio. The aggregator MUST be in the path (it
+        # converts LLMRunFrame/turn-ends into generation triggers — without it Gemini
+        # never responds), but it runs the fast VAD-timeout strategies configured above.
         pipeline = Pipeline([
-            transport.input(),   # Twilio audio in
-            llm,                 # Gemini Live: hears + thinks + speaks
-            transport.output(),  # Twilio audio out
+            transport.input(),      # Twilio audio in
+            aggregator.user(),      # fast VAD-based turn trigger
+            llm,                    # Gemini Live: hears + thinks + speaks
+            transport.output(),     # Twilio audio out
+            aggregator.assistant(), # context bookkeeping
         ])
     else:
         stages = [
