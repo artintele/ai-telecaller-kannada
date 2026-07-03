@@ -161,7 +161,7 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
         await hub.publish({"type": "status", "status": "in-call"})
         messages.append({
             "role": "system",
-            "content": "The call just connected. Speak your FIRST LINE now, warmly, in Bengaluru Kanglish. Greet only once.",
+            "content": "The call just connected. Speak your FIRST LINE now, warmly, in Bengaluru Kanglish.",
         })
         await task.queue_frames([aggregator.user().get_context_frame()])
 
