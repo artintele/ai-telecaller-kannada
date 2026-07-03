@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
@@ -43,6 +44,10 @@ LEXICON_FILE = BASE_DIR / "bangalore_kannada_lexicon.json"
 
 # Twilio media streams are 8kHz mu-law, mono.
 TWILIO_SAMPLE_RATE = 8000
+
+# Per-call debug log: pipecat logs TTFB metrics + turn events here so latency
+# can be measured from real timestamps instead of guessed.
+logger.add(BASE_DIR / "logs" / "call_debug.log", level="DEBUG", rotation="20 MB", retention=3)
 
 
 def build_system_instruction(campaign: dict | None = None) -> str:
@@ -104,19 +109,40 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
 
     tts = None
     if voice_engine.startswith("gemini"):
-        from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
+        from google.genai.types import EndSensitivity, ThinkingConfig
+        from pipecat.services.google.gemini_live.llm import (
+            GeminiLiveLLMService,
+            GeminiVADParams,
+        )
 
         gemini_voice_note = (
             "\n\n## VOICE MODE NOTE\nYou are speaking with your OWN voice (native audio, no TTS). "
             "Ignore all script-formatting rules in section 3 about Kannada script vs Latin — just "
             "SPEAK naturally in casual Bengaluru Kanglish (spoken Kannada mixed with English words), "
-            "warm and human, short turns."
+            "warm and human, short turns. Begin every reply with a quick, natural spoken filler "
+            "('Haan', 'Hmm', 'Okay okay', 'Sari sari', 'Ah correct') BEFORE the substance — it makes "
+            "the conversation feel instant."
         )
+        settings_kwargs = dict(
+            voice=os.getenv("GEMINI_VOICE", "Aoede"),
+            # The service defaults to language "en-US" — Gemini's server-side speech
+            # handling must know the caller speaks Kannada.
+            language="kn-IN",
+            # Server-side VAD owns end-of-turn in Live mode; make it call turns fast.
+            vad=GeminiVADParams(
+                end_sensitivity=EndSensitivity.END_SENSITIVITY_HIGH,
+                silence_duration_ms=600,
+            ),
+            # The default native-audio preview model thinks before speaking; a
+            # tele-caller needs speed over deliberation.
+            thinking=ThinkingConfig(thinking_budget=0),
+        )
+        if os.getenv("GEMINI_LIVE_MODEL"):
+            settings_kwargs["model"] = os.getenv("GEMINI_LIVE_MODEL")
         llm = GeminiLiveLLMService(
             api_key=os.getenv("GOOGLE_API_KEY"),
-            model=os.getenv("GEMINI_LIVE_MODEL") or None,  # None -> pipecat's default native-audio model
-            voice_id=os.getenv("GEMINI_VOICE", "Aoede"),
             system_instruction=build_system_instruction(campaign) + gemini_voice_note,
+            settings=GeminiLiveLLMService.Settings(**settings_kwargs),
         )
     else:
         llm = GoogleLLMService(
@@ -144,28 +170,49 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     # system_instruction. Sarvam mode keeps the proven OpenAILLMContext path.
     messages = []
     if voice_engine.startswith("gemini"):
+        from pipecat.frames.frames import VADUserStoppedSpeakingFrame
         from pipecat.processors.aggregators.llm_context import LLMContext
         from pipecat.processors.aggregators.llm_response_universal import (
             LLMContextAggregatorPair,
             LLMUserAggregatorParams,
         )
         from pipecat.turns.user_start.vad_user_turn_start_strategy import VADUserTurnStartStrategy
-        from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import (
-            SpeechTimeoutUserTurnStopStrategy,
+        from pipecat.turns.user_stop.base_user_turn_stop_strategy import (
+            BaseUserTurnStopStrategy,
         )
         from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
-        context = LLMContext()
-        # Default turn-stop strategies expect STT transcriptions / a turn-analyzer model and
-        # add ~9s of dead air in audio-native mode. Pure VAD timing: turn ends 0.2s after
-        # the VAD says speech stopped (VAD itself waits stop_secs=0.5) -> ~0.7s + model TTFB.
+        class VADImmediateUserTurnStopStrategy(BaseUserTurnStopStrategy):
+            """Close the user turn the moment local VAD reports silence.
+
+            Every stop strategy pipecat ships requires STT transcription text to
+            fire — there is no STT in gemini/gemini-direct mode, so they never
+            trigger and every turn falls to the aggregator's stop timeout
+            (default 5s of dead air). Gemini Live does its own server-side turn
+            handling; locally we only need the turn closed for context/transcript
+            bookkeeping, so plain VAD silence is the right signal.
+            """
+
+            async def process_frame(self, frame):
+                if isinstance(frame, VADUserStoppedSpeakingFrame):
+                    await self.trigger_user_turn_stopped()
+
+        # Seed one short kickoff message: with an empty context the service re-sends
+        # the entire multi-KB system instruction as the first turn to coax a greeting.
+        context = LLMContext(
+            messages=[{
+                "role": "user",
+                "content": "(Call connected. Speak your FIRST LINE now — warm, short, Bengaluru Kanglish.)",
+            }]
+        )
         aggregator = LLMContextAggregatorPair(
             context,
             user_params=LLMUserAggregatorParams(
                 user_turn_strategies=UserTurnStrategies(
                     start=[VADUserTurnStartStrategy()],
-                    stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.2)],
+                    stop=[VADImmediateUserTurnStopStrategy()],
                 ),
+                user_turn_stop_timeout=1.5,  # safety net only; VAD strategy fires first
             ),
         )
     else:
