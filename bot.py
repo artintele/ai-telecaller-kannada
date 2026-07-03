@@ -14,6 +14,7 @@ target pipecat-ai ~0.0.95. If an import fails after `pip install`, run
 import asyncio
 import json
 import os
+import random
 import wave
 from pathlib import Path
 
@@ -76,19 +77,20 @@ class FillerInjector(FrameProcessor):
     """Speak a short pre-recorded acknowledgment while Gemini is still thinking.
 
     Gemini Live's TTFB is bimodal (measured: 0.2-1s usually, but 6-12s outliers).
-    When the caller stops talking and no bot audio has arrived within `delay`
-    seconds, this pushes one filler clip (bot's own voice) so the line never
-    feels dead. Cancelled instantly if the real answer arrives first, if the
-    caller resumes speaking, or on interruption.
+    The delay is deliberately generous: normal turns (even slow-ish ones) get the
+    real answer with NO filler; only a genuine multi-second stall gets covered by
+    a soft non-word backchannel ("mm", "hmm", "haan") in the bot's own voice.
+    Cancelled instantly if the real answer arrives first, if the caller resumes
+    speaking, or on interruption.
     """
 
-    def __init__(self, clips: list[bytes], delay: float = 0.6, sample_rate: int = 8000):
+    def __init__(self, clips: list[bytes], delay: float = 1.2, sample_rate: int = 8000):
         super().__init__()
         self._clips = clips
         self._delay = delay
         self._sample_rate = sample_rate
         self._filler_task = None
-        self._next_clip = 0
+        self._last_clip = -1
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
@@ -109,8 +111,9 @@ class FillerInjector(FrameProcessor):
     async def _play_filler_after_delay(self):
         await asyncio.sleep(self._delay)
         self._filler_task = None
-        pcm = self._clips[self._next_clip % len(self._clips)]
-        self._next_clip += 1
+        choices = [i for i in range(len(self._clips)) if i != self._last_clip]
+        self._last_clip = random.choice(choices) if choices else 0
+        pcm = self._clips[self._last_clip]
         chunk = int(self._sample_rate * 2 * 0.2)  # 200ms chunks so barge-in clears fast
         for i in range(0, len(pcm), chunk):
             await self.push_frame(
@@ -297,7 +300,7 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     # Captures both sides of the conversation and streams it to the demo dashboard.
     transcript = TranscriptProcessor()
 
-    filler = FillerInjector(clips=load_filler_clips(), delay=0.6)
+    filler = FillerInjector(clips=load_filler_clips(), delay=1.2)
 
     if voice_engine == "gemini-direct":
         # Raw audio -> Gemini Live -> raw audio. The aggregator MUST be in the path (it
