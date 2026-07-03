@@ -1,0 +1,9 @@
+# Pipecat 1.x is a breaking API rewrite (dropped OpenAILLMContext, create_context_aggregator,
+# TranscriptProcessor). This project targets the stable pre-1.0 API — pin to 0.0.108. Verified
+# importable on 2026-07-03. Do NOT bump to 1.x without rewriting bot.py to the new context API.
+pipecat-ai[silero,google,sarvam]==0.0.108
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-dotenv==1.0.1
+twilio==9.4.1
+requests==2.32.3

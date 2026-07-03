@@ -1,0 +1,63 @@
+{
+  "meta": {
+    "name": "Bengaluru Kannada (Kanglish) Master Lexicon",
+    "purpose": "Loaded into the tele-caller's system context to anchor it to authentic Bangalore city dialect and prevent drift into formal Mysore/textbook Kannada.",
+    "usage_note": "Injected directly into the LLM system prompt (not vector-retrieved) because the term count is small. If this grows past ~1000 entries, index into a vector store (Qdrant) and retrieve top-k per turn instead.",
+    "register_guardrail": "Terms tagged \"register\":\"street\" are documented for COMPREHENSION only (understand if the customer says them) but MUST NOT be spoken by the agent on a professional call."
+  },
+  "categories": {
+    "slang_and_fillers": [
+      {"latin": "Guru", "script": "ಗುರು", "meaning": "Boss/friend/dude", "register": "street", "speak": false, "example": "Yen guru, hegidira?"},
+      {"latin": "Maga", "script": "ಮಗಾ", "meaning": "Bro/dude", "register": "street", "speak": false, "example": "Svalpa check madi heldre aythu maga."},
+      {"latin": "Sakkath", "script": "ಸಕ್ಕತ್", "meaning": "Awesome/super/very", "register": "casual", "speak": true, "example": "Sakkath offer nadita ide ivaga."},
+      {"latin": "Chindi", "script": "ಚಿಂದಿ", "meaning": "Mind-blowing", "register": "street", "speak": false, "example": "Pipeline ella chindi agi run agta ide."},
+      {"latin": "Bombat", "script": "ಬೊಂಬಾಟ್", "meaning": "Excellent/brilliant", "register": "casual", "speak": false, "example": "Nive nodi bombat agide antira."},
+      {"latin": "Aythu bidi", "script": "ಆಯ್ತು ಬಿಡಿ", "meaning": "Okay then / let it be", "register": "polite-casual", "speak": true, "example": "Aythu bidi sir, naane nalege confirmation call madtini."},
+      {"latin": "Gotha", "script": "ಗೊತ್ತಾ", "meaning": "Do you know?", "register": "casual", "speak": true, "example": "Ee offer limited period gotha?"},
+      {"latin": "Alva", "script": "ಅಲ್ವಾ", "meaning": "Right? / isn't it?", "register": "polite-casual", "speak": true, "example": "Nalege done madbeku, alva?"},
+      {"latin": "Svalpa", "script": "ಸ್ವಲ್ಪ", "meaning": "A little / please (softener)", "register": "polite", "speak": true, "example": "Svalpa hold madi sir."},
+      {"latin": "Tadiris", "script": "ತಡಿರಿ", "meaning": "Wait (polite)", "register": "polite", "speak": true, "example": "Ondu nimisha tadiris, check madtini."}
+    ],
+    "verbs_and_actions": [
+      {"latin": "Matadu", "script": "ಮಾತಾಡು", "meaning": "To speak", "speak": true, "example": "Matadta idini."},
+      {"latin": "Kodu", "script": "ಕೊಡು", "meaning": "To give", "speak": true, "example": "Time kodi."},
+      {"latin": "Heli", "script": "ಹೇಳಿ", "meaning": "Tell/say", "speak": true, "example": "En samachara heli?"},
+      {"latin": "Madi", "script": "ಮಾಡಿ", "meaning": "To do (polite)", "speak": true, "example": "Confirm madi."},
+      {"latin": "Nodi", "script": "ನೋಡಿ", "meaning": "To see/look (polite)", "speak": true, "example": "Check madi nodi."},
+      {"latin": "Kalstini", "script": "ಕಳಿಸ್ತೀನಿ", "meaning": "I will send", "speak": true, "example": "Link kalstini."},
+      {"latin": "Tagoli", "script": "ತಗೋಳಿ", "meaning": "Take it (polite)", "speak": true, "example": "Offer tagoli sir."},
+      {"latin": "Barutte", "script": "ಬರುತ್ತೆ", "meaning": "It comes / I know (a language)", "speak": true, "example": "Nange Kannada barutte."},
+      {"latin": "Hogi", "script": "ಹೋಗಿ", "meaning": "Go (polite)", "speak": true, "example": "Mundhe hogi."}
+    ],
+    "pronouns_and_questions": [
+      {"latin": "Naanu", "script": "ನಾನು", "meaning": "I", "speak": true, "example": "Naanu call madta idini."},
+      {"latin": "Neevu", "script": "ನೀವು", "meaning": "You (respectful)", "speak": true, "example": "Neevu helbeku."},
+      {"latin": "Namma", "script": "ನಮ್ಮ", "meaning": "Our", "speak": true, "example": "Namma artintele.ai inda."},
+      {"latin": "Nimma", "script": "ನಿಮ್ಮ", "meaning": "Your", "speak": true, "example": "Nimma details."},
+      {"latin": "En", "script": "ಏನು", "meaning": "What (clipped)", "speak": true, "example": "En samachara?"},
+      {"latin": "Yaake", "script": "ಯಾಕೆ", "meaning": "Why", "speak": true, "example": "Yaake tension?"},
+      {"latin": "Yavaga", "script": "ಯಾವಾಗ", "meaning": "When", "speak": true, "example": "Yavaga free idira?"},
+      {"latin": "Henge", "script": "ಹೆಂಗೆ", "meaning": "How", "speak": true, "example": "Henge madodu?"},
+      {"latin": "Yelli", "script": "ಎಲ್ಲಿ", "meaning": "Where", "speak": true, "example": "Yelli idira ivaga?"}
+    ],
+    "time_and_transition": [
+      {"latin": "Ivaga", "script": "ಇವಾಗ", "meaning": "Now", "speak": true, "example": "Ivaga call madla?"},
+      {"latin": "Nalege", "script": "ನಾಳೆಗೆ", "meaning": "Tomorrow / by tomorrow", "speak": true, "example": "Nalege postpone madona."},
+      {"latin": "Matte", "script": "ಮತ್ತೆ", "meaning": "Again / and then", "speak": true, "example": "Matte en samachara?"},
+      {"latin": "Aamele", "script": "ಆಮೇಲೆ", "meaning": "Later", "speak": true, "example": "Naane aamele call madtini."},
+      {"latin": "Ninne", "script": "ನಿನ್ನೆ", "meaning": "Yesterday", "speak": true, "example": "Ninne matadidvi, adu."},
+      {"latin": "Eegle", "script": "ಈಗಲೇ", "meaning": "Right now", "speak": true, "example": "Eegle confirm madtini."},
+      {"latin": "Nimisha", "script": "ನಿಮಿಷ", "meaning": "Minute", "speak": true, "example": "Ondu nimisha sir."},
+      {"latin": "Thumba", "script": "ತುಂಬಾ", "meaning": "Very much / a lot", "speak": true, "example": "Thumba thanks bidi."}
+    ],
+    "kanglish_business_phrases": [
+      {"phrase": "Confirm madi", "meaning": "To confirm an action or slot", "speak": true},
+      {"phrase": "Postpone madi", "meaning": "To reschedule a call or task", "speak": true},
+      {"phrase": "Hold madi", "meaning": "Ask the user to wait on the line", "speak": true},
+      {"phrase": "Ping madtini", "meaning": "I'll send a message/alert", "speak": true},
+      {"phrase": "Tension thagobedi", "meaning": "Don't worry / relax", "speak": true},
+      {"phrase": "Free idira?", "meaning": "Are you available?", "speak": true},
+      {"phrase": "Call connect madtini", "meaning": "I'll patch/connect the call through", "speak": true}
+    ]
+  }
+}
