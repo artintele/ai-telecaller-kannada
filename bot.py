@@ -186,6 +186,7 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
     if voice_engine.startswith("gemini"):
         from google.genai.types import EndSensitivity, ThinkingConfig
         from pipecat.services.google.gemini_live.llm import (
+            ContextWindowCompressionParams,
             GeminiLiveLLMService,
             GeminiVADParams,
         )
@@ -211,6 +212,12 @@ async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | No
             # The default native-audio preview model thinks before speaking; a
             # tele-caller needs speed over deliberation.
             thinking=ThinkingConfig(thinking_budget=0),
+            # Latency fix: without this, Gemini Live reprocesses the ENTIRE growing
+            # audio conversation every turn — measured TTFB climbed 1s -> 14s over a
+            # call. Compression keeps the reprocessed window small so latency stays flat.
+            context_window_compression=ContextWindowCompressionParams(
+                enabled=True, trigger_tokens=8000
+            ),
         )
         if os.getenv("GEMINI_LIVE_MODEL"):
             settings_kwargs["model"] = os.getenv("GEMINI_LIVE_MODEL")
