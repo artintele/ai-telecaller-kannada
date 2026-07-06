@@ -400,11 +400,15 @@ async def run_bot(
     # Silero VAD is also happier at 16kHz.
     # Sarvam STT (used in gemini/hybrid) prefers 16kHz; pure-sarvam mode ran at 8kHz fine.
     audio_in_rate = TWILIO_SAMPLE_RATE if voice_engine == "sarvam" else 16000
+    # Gemini TTS ONLY outputs 24kHz. Forcing the pipeline output to 8kHz made Cloud TTS
+    # produce 24kHz audio tagged as 8kHz -> played 3x slow ("naaammaasstee"). Run hybrid
+    # output at 24kHz; the Twilio serializer resamples 24kHz -> 8kHz mu-law for the call.
+    audio_out_rate = 24000 if voice_engine == "hybrid" else TWILIO_SAMPLE_RATE
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
             audio_in_sample_rate=audio_in_rate,
-            audio_out_sample_rate=TWILIO_SAMPLE_RATE,
+            audio_out_sample_rate=audio_out_rate,
             allow_interruptions=True,
             enable_metrics=True,
         ),
