@@ -252,25 +252,39 @@ async def run_bot(
             settings=GeminiLiveLLMService.Settings(**settings_kwargs),
         )
     else:
+        # Cascade: Sarvam STT -> Gemini TEXT LLM -> {Sarvam TTS | Gemini TTS}.
+        # "hybrid" keeps Gemini's Aoede voice (via Vertex, streamed); "sarvam" uses
+        # Sarvam Bulbul (fastest voice). Gemini text is fast (~0.5s); the voice choice
+        # is the latency/quality tradeoff.
         llm = GoogleLLMService(
             api_key=os.getenv("GOOGLE_API_KEY"),
             model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             params=GoogleLLMService.InputParams(temperature=0.4),
         )
-        speaker = (campaign or {}).get("SARVAM_TTS_SPEAKER") or os.getenv("SARVAM_TTS_SPEAKER", "kavya")
-        tts_model = (campaign or {}).get("SARVAM_TTS_MODEL") or os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
-        tts = SarvamTTSService(
-            api_key=os.getenv("SARVAM_API_KEY"),
-            model=tts_model,
-            voice_id=speaker,
-            sample_rate=TWILIO_SAMPLE_RATE,
-            params=SarvamTTSService.InputParams(
-                language=Language.KN_IN,
-                pace=1.05,
-                pitch=0.0,
-                loudness=1.0,
-            ),
-        )
+        if voice_engine == "hybrid":
+            from pipecat.services.google.tts import GeminiTTSService
+
+            tts = GeminiTTSService(
+                credentials_path=str(BASE_DIR / os.getenv("GCP_KEY_PATH", "gcp-key.json")),
+                location=os.getenv("GCP_LOCATION", "global"),
+                voice_id=os.getenv("GEMINI_VOICE", "Aoede"),
+                model="gemini-2.5-flash-tts",  # Vertex TTS outputs 24kHz; pipeline downsamples
+            )
+        else:
+            speaker = (campaign or {}).get("SARVAM_TTS_SPEAKER") or os.getenv("SARVAM_TTS_SPEAKER", "kavya")
+            tts_model = (campaign or {}).get("SARVAM_TTS_MODEL") or os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
+            tts = SarvamTTSService(
+                api_key=os.getenv("SARVAM_API_KEY"),
+                model=tts_model,
+                voice_id=speaker,
+                sample_rate=TWILIO_SAMPLE_RATE,
+                params=SarvamTTSService.InputParams(
+                    language=Language.KN_IN,
+                    pace=1.05,
+                    pitch=0.0,
+                    loudness=1.0,
+                ),
+            )
 
     # Conversation context. Gemini Live uses the universal context API (its old-style
     # aggregator path is broken in pipecat 0.0.108); the big system prompt goes in via
@@ -381,7 +395,8 @@ async def run_bot(
     # otherwise Gemini gets half-rate audio and cannot understand the caller (it falls
     # back to "network problem, say again"). Output stays 8kHz for Twilio.
     # Silero VAD is also happier at 16kHz.
-    audio_in_rate = 16000 if voice_engine.startswith("gemini") else TWILIO_SAMPLE_RATE
+    # Sarvam STT (used in gemini/hybrid) prefers 16kHz; pure-sarvam mode ran at 8kHz fine.
+    audio_in_rate = TWILIO_SAMPLE_RATE if voice_engine == "sarvam" else 16000
     task = PipelineTask(
         pipeline,
         params=PipelineParams(

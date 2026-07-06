@@ -7,3 +7,8 @@ __pycache__/
 .DS_Store
 logs/
 .claude/
+
+# GCP service account key — NEVER commit
+gcp-key.json
+*.gcp.json
+service-account*.json
