@@ -74,20 +74,29 @@ def load_filler_clips() -> list[bytes]:
 
 
 class FillerInjector(FrameProcessor):
-    """Speak a short pre-recorded acknowledgment while Gemini is still thinking.
+    """Cover Gemini's thinking time with natural, acknowledging Kanglish "please hold" clips.
 
-    Gemini Live's TTFB is bimodal (measured: 0.2-1s usually, but 6-12s outliers).
-    The delay is deliberately generous: normal turns (even slow-ish ones) get the
-    real answer with NO filler; only a genuine multi-second stall gets covered by
-    a soft non-word backchannel ("mm", "hmm", "haan") in the bot's own voice.
-    Cancelled instantly if the real answer arrives first, if the caller resumes
-    speaking, or on interruption.
+    Gemini Live's TTFB is bimodal (measured: <2s often, but 5-20s outliers). A single
+    filler can't cover a 15s wait, so this CHAINS them: after `delay` of silence it plays
+    an acknowledgment ("ondu nimisha sir, line alli iri"), waits `gap`, and if the real
+    answer still hasn't arrived, plays another ("haan checking sir")... continuing until
+    Gemini responds. Pattern the caller hears:  filler → gap → filler → gap → real answer.
+
+    Cancelled instantly (mid-clip) when the real answer's audio arrives, the caller
+    resumes speaking, or on interruption.
     """
 
-    def __init__(self, clips: list[bytes], delay: float = 1.2, sample_rate: int = 8000):
+    def __init__(
+        self,
+        clips: list[bytes],
+        delay: float = 1.4,
+        gap: float = 1.1,
+        sample_rate: int = 8000,
+    ):
         super().__init__()
         self._clips = clips
-        self._delay = delay
+        self._delay = delay          # silence before the FIRST filler
+        self._gap = gap              # silence between chained fillers
         self._sample_rate = sample_rate
         self._filler_task = None
         self._last_clip = -1
@@ -96,7 +105,7 @@ class FillerInjector(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, VADUserStoppedSpeakingFrame) and self._clips:
             await self._cancel_pending()
-            self._filler_task = self.create_task(self._play_filler_after_delay())
+            self._filler_task = self.create_task(self._play_fillers())
         elif isinstance(
             frame, (TTSStartedFrame, TTSAudioRawFrame, VADUserStartedSpeakingFrame, InterruptionFrame)
         ):
@@ -108,19 +117,21 @@ class FillerInjector(FrameProcessor):
             task, self._filler_task = self._filler_task, None
             await self.cancel_task(task)
 
-    async def _play_filler_after_delay(self):
+    async def _play_fillers(self):
+        # Keep filling until the real answer arrives (which cancels this task).
         await asyncio.sleep(self._delay)
-        self._filler_task = None
-        choices = [i for i in range(len(self._clips)) if i != self._last_clip]
-        self._last_clip = random.choice(choices) if choices else 0
-        pcm = self._clips[self._last_clip]
-        chunk = int(self._sample_rate * 2 * 0.2)  # 200ms chunks so barge-in clears fast
-        for i in range(0, len(pcm), chunk):
-            await self.push_frame(
-                TTSAudioRawFrame(
-                    audio=pcm[i : i + chunk], sample_rate=self._sample_rate, num_channels=1
+        while True:
+            choices = [i for i in range(len(self._clips)) if i != self._last_clip]
+            self._last_clip = random.choice(choices) if choices else 0
+            pcm = self._clips[self._last_clip]
+            chunk = int(self._sample_rate * 2 * 0.2)  # 200ms chunks so barge-in clears fast
+            for i in range(0, len(pcm), chunk):
+                await self.push_frame(
+                    TTSAudioRawFrame(
+                        audio=pcm[i : i + chunk], sample_rate=self._sample_rate, num_channels=1
+                    )
                 )
-            )
+            await asyncio.sleep(self._gap)  # natural pause before the next acknowledgment
 
 
 def build_system_instruction(campaign: dict | None = None) -> str:
@@ -321,9 +332,9 @@ async def run_bot(
     # Captures both sides of the conversation and streams it to the demo dashboard.
     transcript = TranscriptProcessor()
 
-    # delay=1.8: only cover genuinely slow turns. With compression keeping most turns
-    # ~1-2s, a 1.2s filler fired on almost every turn (awkward); 1.8s makes it rare.
-    filler = FillerInjector(clips=load_filler_clips(), delay=1.8)
+    # delay=1.4: fast turns (<1.4s) get the real answer with no filler; slower turns get
+    # a chain of acknowledgments (gap=1.1s between them) covering the whole thinking time.
+    filler = FillerInjector(clips=load_filler_clips(), delay=1.4, gap=1.1)
 
     if voice_engine == "gemini-direct":
         # Raw audio -> Gemini Live -> raw audio. The aggregator MUST be in the path (it

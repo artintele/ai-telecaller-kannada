@@ -25,16 +25,25 @@ load_dotenv()
 FILLERS_DIR = Path(__file__).parent / "assets" / "fillers"
 VOICE = os.getenv("GEMINI_VOICE", "Aoede")
 
-# name -> acknowledging "please hold on" fillers a real Bengaluru tele-caller says while
-# looking something up. Kanglish (Kannada + a little English), reassuring, so the caller
-# knows the agent is still there and working — not awkward dead air.
+# name -> acknowledging "please hold on / let me check" fillers a real Bengaluru tele-caller
+# says while searching or thinking. Kanglish, reassuring, natural — a WIDE range so a chain
+# of them (played back-to-back during a long wait) never sounds repetitive. Mix of lengths.
 FILLERS = {
-    "line_alli_iri": "ಒಂದು ನಿಮಿಷ ಸರ್, line ಅಲ್ಲಿ ಇರಿ.",
-    "ok_ond_nimsha": "ok ಸರ್, ಒಂದು ನಿಮಿಷ!",
-    "ok_sir": "ok ಸರ್.",
+    # short acknowledgments
+    "ok_sir": "ok ಸರ್, ಒಂದು ಸೆಕೆಂಡ್.",
     "sure_sir": "ಹ್ಂ, sure ಸರ್.",
-    "check_maadtini": "ಸರಿ ಸರ್, ಒಂದು ಸೆಕೆಂಡ್ check ಮಾಡ್ತಿನಿ.",
     "haan_ondu_second": "ಹಾಂ ಹಾಂ, ಒಂದು ಸೆಕೆಂಡ್ ಸರ್.",
+    "sari_sir": "ಸರಿ ಸರ್, ಒಂದು ನಿಮಿಷ.",
+    # hold-the-line
+    "line_alli_iri": "ಒಂದು ನಿಮಿಷ ಸರ್, line ಅಲ್ಲಿ ಇರಿ.",
+    "ok_ond_nimsha": "ok ಸರ್, ಒಂದು ನಿಮಿಷ, ಇಲ್ಲೇ ಇರಿ!",
+    "hold_maadi": "ಸ್ವಲ್ಪ hold ಮಾಡಿ ಸರ್, ಈಗ ಬಂದೆ.",
+    # actively searching / checking
+    "check_maadtini": "ಸರಿ ಸರ್, ಒಂದು ಸೆಕೆಂಡ್ check ಮಾಡ್ತಿನಿ.",
+    "details_nodtini": "ಒಂದು ನಿಮಿಷ ಸರ್, ನಿಮ್ಮ details ನೋಡ್ತಾ ಇದೀನಿ.",
+    "system_alli": "ಹಾಂ ಸರ್, system ಅಲ್ಲಿ ಒಂದು ಸೆಕೆಂಡ್ ನೋಡ್ತಿನಿ.",
+    "information_tegitini": "ಸ್ವಲ್ಪ ಇರಿ ಸರ್, ಪೂರ್ತಿ information ತೆಗಿತಾ ಇದೀನಿ.",
+    "confirm_maadtini": "ಒಂದು ನಿಮಿಷ ಕೊಡಿ ಸರ್, confirm ಮಾಡಿ ಹೇಳ್ತಿನಿ.",
 }
 
 STYLE = (
