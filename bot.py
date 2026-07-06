@@ -366,7 +366,9 @@ async def run_bot(
 
     # One prompt, meaningful acknowledgment per turn (fires ~0.9s after you stop); a
     # second reassurance only if Gemini is still silent 4s later. No machine-gun chaining.
-    filler = FillerInjector(clips=load_filler_clips(), delay=0.9, second_after=4.0)
+    # FILLERS_ENABLED=false disables them entirely (empty clip list -> inert pass-through).
+    filler_clips = [] if os.getenv("FILLERS_ENABLED", "true").lower() == "false" else load_filler_clips()
+    filler = FillerInjector(clips=filler_clips, delay=0.9, second_after=4.0)
 
     if voice_engine == "gemini-direct":
         # Raw audio -> Gemini Live -> raw audio. The aggregator MUST be in the path (it
