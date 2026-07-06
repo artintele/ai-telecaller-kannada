@@ -175,7 +175,7 @@ async def run_bot(
             add_wav_header=False,
             # stop_secs: end-of-turn wait; start_secs 0.2->0.12 so barge-in
             # (interruption broadcast + Twilio buffer clear) fires near-instantly.
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.5, start_secs=0.12)),
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.4, start_secs=0.12)),
             serializer=serializer,
         ),
     )
@@ -218,7 +218,7 @@ async def run_bot(
             # Server-side VAD owns end-of-turn in Live mode; make it call turns fast.
             vad=GeminiVADParams(
                 end_sensitivity=EndSensitivity.END_SENSITIVITY_HIGH,
-                silence_duration_ms=600,
+                silence_duration_ms=400,
             ),
             # The default native-audio preview model thinks before speaking; a
             # tele-caller needs speed over deliberation.
@@ -228,7 +228,10 @@ async def run_bot(
             # call. Compression keeps the reprocessed window small so latency stays flat.
             # NOTE: pipecat expects a plain dict here (it calls .get() on it), NOT the
             # ContextWindowCompressionParams object.
-            context_window_compression={"enabled": True, "trigger_tokens": 8000},
+            # trigger_tokens LOW + aggressive: measured TTFB climbed 0.7->14s over 5
+            # turns at trigger=8000 (too late). 2500 compresses after ~2 turns so the
+            # reprocessed window — and thus latency — stays flat.
+            context_window_compression={"enabled": True, "trigger_tokens": 2500},
         )
         if os.getenv("GEMINI_LIVE_MODEL"):
             settings_kwargs["model"] = os.getenv("GEMINI_LIVE_MODEL")
@@ -318,7 +321,9 @@ async def run_bot(
     # Captures both sides of the conversation and streams it to the demo dashboard.
     transcript = TranscriptProcessor()
 
-    filler = FillerInjector(clips=load_filler_clips(), delay=1.2)
+    # delay=1.8: only cover genuinely slow turns. With compression keeping most turns
+    # ~1-2s, a 1.2s filler fired on almost every turn (awkward); 1.8s makes it rare.
+    filler = FillerInjector(clips=load_filler_clips(), delay=1.8)
 
     if voice_engine == "gemini-direct":
         # Raw audio -> Gemini Live -> raw audio. The aggregator MUST be in the path (it

@@ -25,22 +25,21 @@ load_dotenv()
 FILLERS_DIR = Path(__file__).parent / "assets" / "fillers"
 VOICE = os.getenv("GEMINI_VOICE", "Aoede")
 
-# name -> the word/phrase to speak. Keep them SHORT (they cover a <1.5s stall).
+# name -> the Kannada backchannel to speak. Natural spoken Bengaluru fillers a real
+# tele-caller uses while thinking. Kannada (not English) so they blend with the agent's
+# native Kannada voice instead of sounding foreign. Keep them SHORT.
 FILLERS = {
-    "hmm": "hmm",
-    "okay": "okay",
-    "alright": "alright",
-    "right": "right, right",
-    "gotit": "got it",
-    "sure": "sure, sure",
-    "achha": "achha",
-    "okay_haan": "haan, okay",
+    "haan": "ಹಾಂ",
+    "haan_haan": "ಹಾಂ ಹಾಂ",
+    "sari_sir": "ಸರಿ ಸರ್",
+    "ondu_nimisha": "ಒಂದು ನಿಮಿಷ ಸರ್",
+    "hmm": "ಹ್ಮ್ಂ",
+    "haudu": "ಹೌದು ಸರ್",
 }
 
 STYLE = (
-    "Say this casually and warmly, in a natural Indian English accent — like a friendly "
-    "Bangalore call-centre agent giving a quick, short acknowledgement mid-conversation. "
-    "Keep it brief and relaxed, not enthusiastic: "
+    "Speak this as a warm, casual Bengaluru Kannada tele-caller giving a quick, natural "
+    "spoken acknowledgement mid-conversation — relaxed and brief, not enthusiastic. Kannada: "
 )
 
 
