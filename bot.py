@@ -264,11 +264,14 @@ async def run_bot(
         if voice_engine == "hybrid":
             from pipecat.services.google.tts import GeminiTTSService
 
+            # location must be a real regional prefix or omitted. Pipecat builds
+            # "{location}-texttospeech.googleapis.com"; "global" -> 404. Leave it unset
+            # to use the default endpoint (verified working at 0.94s first-byte).
             tts = GeminiTTSService(
                 credentials_path=str(BASE_DIR / os.getenv("GCP_KEY_PATH", "gcp-key.json")),
-                location=os.getenv("GCP_LOCATION", "global"),
+                location=os.getenv("GCP_LOCATION") or None,
                 voice_id=os.getenv("GEMINI_VOICE", "Aoede"),
-                model="gemini-2.5-flash-tts",  # Vertex TTS outputs 24kHz; pipeline downsamples
+                model="gemini-2.5-flash-tts",  # outputs 24kHz; pipeline downsamples to 8kHz
             )
         else:
             speaker = (campaign or {}).get("SARVAM_TTS_SPEAKER") or os.getenv("SARVAM_TTS_SPEAKER", "kavya")
