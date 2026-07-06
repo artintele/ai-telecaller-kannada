@@ -25,31 +25,23 @@ load_dotenv()
 FILLERS_DIR = Path(__file__).parent / "assets" / "fillers"
 VOICE = os.getenv("GEMINI_VOICE", "Aoede")
 
-# name -> acknowledging "please hold on / let me check" fillers a real Bengaluru tele-caller
-# says while searching or thinking. Kanglish, reassuring, natural — a WIDE range so a chain
-# of them (played back-to-back during a long wait) never sounds repetitive. Mix of lengths.
+# name -> NEUTRAL acknowledgment sounds a person naturally makes while starting to answer.
+# NOT "let me check / hold on / looking it up" — the agent never looks anything up, every
+# answer comes straight from it, so a lookup filler is wrong (e.g. for "which bank are you
+# from?"). These are just warm human backchannels that fit ANY reply. Keep SHORT.
 FILLERS = {
-    # short acknowledgments
-    "ok_sir": "ok ಸರ್, ಒಂದು ಸೆಕೆಂಡ್.",
-    "sure_sir": "ಹ್ಂ, sure ಸರ್.",
-    "haan_ondu_second": "ಹಾಂ ಹಾಂ, ಒಂದು ಸೆಕೆಂಡ್ ಸರ್.",
-    "sari_sir": "ಸರಿ ಸರ್, ಒಂದು ನಿಮಿಷ.",
-    # hold-the-line
-    "line_alli_iri": "ಒಂದು ನಿಮಿಷ ಸರ್, line ಅಲ್ಲಿ ಇರಿ.",
-    "ok_ond_nimsha": "ok ಸರ್, ಒಂದು ನಿಮಿಷ, ಇಲ್ಲೇ ಇರಿ!",
-    "hold_maadi": "ಸ್ವಲ್ಪ hold ಮಾಡಿ ಸರ್, ಈಗ ಬಂದೆ.",
-    # actively searching / checking
-    "check_maadtini": "ಸರಿ ಸರ್, ಒಂದು ಸೆಕೆಂಡ್ check ಮಾಡ್ತಿನಿ.",
-    "details_nodtini": "ಒಂದು ನಿಮಿಷ ಸರ್, ನಿಮ್ಮ details ನೋಡ್ತಾ ಇದೀನಿ.",
-    "system_alli": "ಹಾಂ ಸರ್, system ಅಲ್ಲಿ ಒಂದು ಸೆಕೆಂಡ್ ನೋಡ್ತಿನಿ.",
-    "information_tegitini": "ಸ್ವಲ್ಪ ಇರಿ ಸರ್, ಪೂರ್ತಿ information ತೆಗಿತಾ ಇದೀನಿ.",
-    "confirm_maadtini": "ಒಂದು ನಿಮಿಷ ಕೊಡಿ ಸರ್, confirm ಮಾಡಿ ಹೇಳ್ತಿನಿ.",
+    "haan": "ಹಾಂ...",
+    "haan_sir": "ಹಾಂ ಸರ್...",
+    "hmm": "ಹ್ಮ್ಂ...",
+    "haan_haan": "ಹಾಂ ಹಾಂ...",
+    "howdu_sir": "ಹೌದು ಸರ್...",
+    "sari_sir": "ಸರಿ ಸರ್...",
 }
 
 STYLE = (
-    "Speak this as a warm, reassuring Bengaluru Kannada tele-caller politely asking the "
-    "customer to hold on for a moment while you check something — natural, calm, and "
-    "acknowledging, like you are still with them on the line. Kanglish: "
+    "Speak this as a warm Bengaluru Kannada tele-caller making a short, natural "
+    "acknowledgement sound as you begin to answer — like a soft 'mm-hmm' / 'yeah'. "
+    "Relaxed, brief, thinking-aloud, NOT enthusiastic. Kannada: "
 )
 
 

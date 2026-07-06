@@ -24,6 +24,7 @@ from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     InterruptionFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
@@ -100,10 +101,14 @@ class FillerInjector(FrameProcessor):
         self._sample_rate = sample_rate
         self._filler_task = None
         self._last_clip = -1
+        self._ready = False  # no fillers until the greeting has been spoken
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
-        if isinstance(frame, VADUserStoppedSpeakingFrame) and self._clips:
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            # The opening greeting has finished — fillers allowed from here on.
+            self._ready = True
+        elif isinstance(frame, VADUserStoppedSpeakingFrame) and self._clips and self._ready:
             await self._cancel_pending()
             self._filler_task = self.create_task(self._play_fillers())
         elif isinstance(
