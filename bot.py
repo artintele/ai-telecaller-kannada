@@ -360,10 +360,16 @@ async def run_bot(
                 "content": msg.content,
             })
 
+    # Gemini Live expects 16kHz PCM input; Twilio delivers 8kHz. Run the pipeline input
+    # at 16kHz so the transport upsamples the phone audio before Gemini hears it —
+    # otherwise Gemini gets half-rate audio and cannot understand the caller (it falls
+    # back to "network problem, say again"). Output stays 8kHz for Twilio.
+    # Silero VAD is also happier at 16kHz.
+    audio_in_rate = 16000 if voice_engine.startswith("gemini") else TWILIO_SAMPLE_RATE
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            audio_in_sample_rate=TWILIO_SAMPLE_RATE,
+            audio_in_sample_rate=audio_in_rate,
             audio_out_sample_rate=TWILIO_SAMPLE_RATE,
             allow_interruptions=True,
             enable_metrics=True,
