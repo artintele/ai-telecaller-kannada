@@ -147,13 +147,25 @@ def build_system_instruction(campaign: dict | None = None) -> str:
     return instruction
 
 
-async def run_bot(websocket, stream_sid: str, call_sid: str, campaign: dict | None = None):
-    serializer = TwilioFrameSerializer(
-        stream_sid=stream_sid,
-        call_sid=call_sid,
-        account_sid=os.getenv("TWILIO_ACCOUNT_SID"),
-        auth_token=os.getenv("TWILIO_AUTH_TOKEN"),
-    )
+async def run_bot(
+    websocket,
+    stream_sid: str,
+    call_sid: str,
+    campaign: dict | None = None,
+    provider: str = "twilio",
+):
+    if provider == "exotel":
+        from pipecat.serializers.exotel import ExotelFrameSerializer
+
+        # Exotel streams 8kHz PCM (not mulaw); no auth token needed by the serializer.
+        serializer = ExotelFrameSerializer(stream_sid=stream_sid, call_sid=call_sid)
+    else:
+        serializer = TwilioFrameSerializer(
+            stream_sid=stream_sid,
+            call_sid=call_sid,
+            account_sid=os.getenv("TWILIO_ACCOUNT_SID"),
+            auth_token=os.getenv("TWILIO_AUTH_TOKEN"),
+        )
 
     transport = FastAPIWebsocketTransport(
         websocket=websocket,

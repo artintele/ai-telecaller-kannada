@@ -105,13 +105,60 @@ async def twiml(_request: Request):
 async def media_stream(websocket: WebSocket):
     await websocket.accept()
     iterator = websocket.iter_text()
-    await iterator.__anext__()                          # Twilio "connected"
-    start_msg = json.loads(await iterator.__anext__())  # Twilio "start"
-    stream_sid = start_msg["start"]["streamSid"]
-    call_sid = start_msg["start"]["callSid"]
 
-    # Use whatever context the demo operator set in the dashboard.
-    await run_bot(websocket, stream_sid, call_sid, campaign=dict(hub.campaign))
+    # Auto-detect Twilio vs Exotel from the first frame(s).
+    #   Twilio:  {"event":"connected"} then {"event":"start","start":{"streamSid","callSid"}}
+    #   Exotel:  {"event":"start","start":{"stream_sid","call_sid"}}   (snake_case, PCM 8k)
+    first = json.loads(await iterator.__anext__())
+    if first.get("event") == "connected":  # Twilio sends this first
+        start_msg = json.loads(await iterator.__anext__())
+        provider = "twilio"
+        stream_sid = start_msg["start"]["streamSid"]
+        call_sid = start_msg["start"]["callSid"]
+    elif first.get("event") == "start" and "stream_sid" in first.get("start", {}):
+        provider = "exotel"
+        stream_sid = first["start"]["stream_sid"]
+        call_sid = first["start"].get("call_sid")
+    else:  # fall back to Twilio-style start
+        provider = "twilio"
+        stream_sid = first["start"]["streamSid"]
+        call_sid = first["start"]["callSid"]
+
+    await run_bot(websocket, stream_sid, call_sid, campaign=dict(hub.campaign), provider=provider)
+
+
+@app.post("/api/call-exotel")
+async def start_call_exotel(request: Request):
+    """Place an outbound call via Exotel (India). Body: {"to": "+9198XXXXXXXX"}
+
+    Requires EXOTEL_FLOW_URL (the App/flow that contains a Voicebot bidirectional-
+    streaming applet pointing at wss://<PUBLIC_HOST>/ws) and EXOTEL_CALLER_ID (your
+    ExoPhone). Set both in .env after creating the flow in the Exotel dashboard.
+    """
+    import httpx
+
+    body = await request.json()
+    to_number = body.get("to") or hub.campaign.get("CUSTOMER", {}).get("phone")
+    caller_id = os.getenv("EXOTEL_CALLER_ID")
+    flow_url = os.getenv("EXOTEL_FLOW_URL")
+    if not (to_number and caller_id and flow_url):
+        return JSONResponse(
+            {"ok": False, "error": "need 'to', EXOTEL_CALLER_ID and EXOTEL_FLOW_URL set"},
+            status_code=400,
+        )
+    sid = os.getenv("EXOTEL_SID")
+    subdomain = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
+    url = f"https://{subdomain}/v1/Accounts/{sid}/Calls/connect.json"
+    auth = (os.getenv("EXOTEL_API_KEY"), os.getenv("EXOTEL_API_TOKEN"))
+    data = {"From": to_number, "CallerId": caller_id, "Url": flow_url}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(url, data=data, auth=auth)
+        ok = r.status_code < 300
+        await hub.publish({"type": "status", "status": "dialing (exotel)" if ok else "exotel error"})
+        return JSONResponse({"ok": ok, "status_code": r.status_code, "body": r.text[:500]})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.get("/health")
