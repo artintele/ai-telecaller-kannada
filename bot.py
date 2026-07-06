@@ -274,8 +274,11 @@ async def run_bot(
                 model="gemini-2.5-flash-tts",  # outputs 24kHz; pipeline downsamples to 8kHz
             )
         else:
-            speaker = (campaign or {}).get("SARVAM_TTS_SPEAKER") or os.getenv("SARVAM_TTS_SPEAKER", "kavya")
-            tts_model = (campaign or {}).get("SARVAM_TTS_MODEL") or os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
+            # .env is authoritative for the voice — a stale dashboard campaign value can
+            # otherwise force an incompatible speaker/model combo (e.g. kavya on v2) and
+            # every TTS call 400s -> dead call. Model+speaker MUST be a valid Sarvam pair.
+            tts_model = os.getenv("SARVAM_TTS_MODEL") or (campaign or {}).get("SARVAM_TTS_MODEL") or "bulbul:v2"
+            speaker = os.getenv("SARVAM_TTS_SPEAKER") or (campaign or {}).get("SARVAM_TTS_SPEAKER") or "anushka"
             tts = SarvamTTSService(
                 api_key=os.getenv("SARVAM_API_KEY"),
                 model=tts_model,
