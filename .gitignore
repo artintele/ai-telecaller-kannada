@@ -8,7 +8,7 @@ __pycache__/
 logs/
 .claude/
 
-# GCP service account key — NEVER commit
-gcp-key.json
+# GCP service account keys — NEVER commit (gcp-key.json* also catches .bak backups)
+gcp-key.json*
 *.gcp.json
 service-account*.json

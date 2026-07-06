@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import random
+import time
 import wave
 from pathlib import Path
 
@@ -63,57 +64,111 @@ logger.add(BASE_DIR / "logs" / "call_debug.log", level="DEBUG", rotation="20 MB"
 
 FILLERS_DIR = BASE_DIR / "assets" / "fillers"
 
+# Ordered stall FLOWS: tier 0 (covers 0-3s) -> tier 1 (3-7s) -> tier 2 (7-10s).
+# On disk each is "{flow}_{tier}.wav"; the quick-stall pool is "quick_{i}.wav".
+# Kept in sync with generate_fillers.py (that file holds the actual phrasing).
+FILLER_FLOW_NAMES = ("account", "transaction", "loan", "universal")
+QUICK_STALL_COUNT = 3
 
-def load_filler_clips() -> list[bytes]:
-    """Load pre-generated 8kHz PCM filler clips (Aoede voice, via Gemini TTS)."""
-    clips = []
+
+def _load_wav(path: Path) -> tuple[bytes, float]:
+    """Read an 8kHz mono PCM clip -> (raw pcm bytes, real duration in seconds)."""
+    with wave.open(str(path), "rb") as w:
+        pcm = w.readframes(w.getnframes())
+        dur = w.getnframes() / float(w.getframerate())
+    return pcm, dur
+
+
+def load_filler_flows() -> tuple[dict[str, list[tuple[bytes, float]]], list[tuple[bytes, float]]]:
+    """Load the tiered stall flows + quick-stall pool from assets/fillers/.
+
+    Returns (flows, quick) where flows[name] is the ordered tier list
+    [(pcm, dur), ...] and quick is the shared short-opener pool. Missing files
+    are skipped so a partial regenerate still runs.
+    """
+    flows: dict[str, list[tuple[bytes, float]]] = {}
     if FILLERS_DIR.is_dir():
-        for path in sorted(FILLERS_DIR.glob("*.wav")):
-            with wave.open(str(path), "rb") as w:
-                clips.append(w.readframes(w.getnframes()))
-    return clips
+        for name in FILLER_FLOW_NAMES:
+            tiers = [
+                _load_wav(FILLERS_DIR / f"{name}_{tier}.wav")
+                for tier in range(3)
+                if (FILLERS_DIR / f"{name}_{tier}.wav").exists()
+            ]
+            if tiers:
+                flows[name] = tiers
+    quick = [
+        _load_wav(FILLERS_DIR / f"quick_{i}.wav")
+        for i in range(QUICK_STALL_COUNT)
+        if (FILLERS_DIR / f"quick_{i}.wav").exists()
+    ]
+    return flows, quick
 
 
 class FillerInjector(FrameProcessor):
-    """Cover Gemini's thinking time with natural, acknowledging Kanglish "please hold" clips.
+    """Cover Gemini's occasional slow turns with a coherent, TIERED "please hold" flow.
 
-    Gemini Live's TTFB is bimodal (measured: <2s often, but 5-20s outliers). A single
-    filler can't cover a 15s wait, so this CHAINS them: after `delay` of silence it plays
-    an acknowledgment ("ondu nimisha sir, line alli iri"), waits `gap`, and if the real
-    answer still hasn't arrived, plays another ("haan checking sir")... continuing until
-    Gemini responds. Pattern the caller hears:  filler → gap → filler → gap → real answer.
+    Gemini Live TTFB is bimodal: usually ~1s, but with 5-10s outliers. A single ack
+    can't cover a 7s wait without sounding broken, so this plays an ORDERED flow that
+    tells a story as the wait grows (times measured from when the caller stops):
+        ~1.1s  tier 0  "ondu nimisha sir, account pull up maadtha iddini..."   (0-3s)
+        ~4s    tier 1  "details screen mele load aagtha ide..."                (3-7s)
+        ~7.5s  tier 2  "almost mugithu sir, one second..."                     (7-10s)
+    Each tier is allowed to ACTUALLY PLAY OUT (duration-aware sleeps) before the next
+    is considered, so tiers never stack/machine-gun (the old failure mode). The whole
+    sequence is cancelled the instant the real answer's audio arrives, the caller
+    speaks again, or on interruption.
 
-    Cancelled instantly (mid-clip) when the real answer's audio arrives, the caller
-    resumes speaking, or on interruption.
+    The flow is chosen per call (FILLER_FLOW: account|transaction|loan|universal).
+    'universal' + the quick-stall pool are safe on ANY query; the domain flows name
+    specific actions (statement fetch, loan eligibility) so only select them when the
+    campaign is actually about that.
     """
 
     def __init__(
         self,
-        clips: list[bytes],
-        delay: float = 0.9,
-        second_after: float = 4.0,
+        flows: dict[str, list[tuple[bytes, float]]],
+        quick: list[tuple[bytes, float]],
+        flow_name: str = "universal",
+        delay: float = 1.1,
+        gap: float = 0.35,
+        min_query_secs: float = 2.5,
         sample_rate: int = 8000,
     ):
         super().__init__()
-        self._clips = clips
-        self._delay = delay              # fire the ack promptly ("pat pat") after user stops
-        self._second_after = second_after  # only reassure again if still waiting this long
+        self._flows = flows
+        self._quick = quick
+        self._flow_name = flow_name if flow_name in flows else "universal"
+        self._delay = delay      # wait before the first ack — long enough to skip fast turns
+        self._gap = gap          # breath between tiers, on top of the clip's own playout
+        # Only arm the filler after a LONG/complex question (the caller spoke this many
+        # seconds). Short questions get an instant answer with no filler — the ack only
+        # appears where a "let me check that" beat is genuinely earned.
+        self._min_query_secs = min_query_secs
         self._sample_rate = sample_rate
         self._filler_task = None
-        self._last_clip = -1
+        self._last_quick = -1
+        self._user_start_t = None  # monotonic time the current user utterance began
         self._ready = False  # no fillers until the greeting has been spoken
+
+    def _active_flow(self) -> list[tuple[bytes, float]] | None:
+        return self._flows.get(self._flow_name) or self._flows.get("universal")
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
         if isinstance(frame, BotStoppedSpeakingFrame):
             # The opening greeting has finished — fillers allowed from here on.
             self._ready = True
-        elif isinstance(frame, VADUserStoppedSpeakingFrame) and self._clips and self._ready:
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
+            self._user_start_t = time.monotonic()
             await self._cancel_pending()
-            self._filler_task = self.create_task(self._play_fillers())
-        elif isinstance(
-            frame, (TTSStartedFrame, TTSAudioRawFrame, VADUserStartedSpeakingFrame, InterruptionFrame)
-        ):
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            # Gate on how long they spoke: only a long/complex query earns a filler.
+            dur = (time.monotonic() - self._user_start_t) if self._user_start_t else 0.0
+            self._user_start_t = None
+            if self._ready and self._active_flow() and dur >= self._min_query_secs:
+                await self._cancel_pending()
+                self._filler_task = self.create_task(self._play_flow())
+        elif isinstance(frame, (TTSStartedFrame, TTSAudioRawFrame, InterruptionFrame)):
             await self._cancel_pending()
         await self.push_frame(frame, direction)
 
@@ -122,21 +177,25 @@ class FillerInjector(FrameProcessor):
             task, self._filler_task = self._filler_task, None
             await self.cancel_task(task)
 
-    async def _play_fillers(self):
-        # ONE meaningful acknowledgment, fired promptly — like a human saying "ondu
-        # nimisha sir, check maadtini" once, then waiting. NO chaining (that spammed).
-        # A second, longer hold phrase only fires if the wait is genuinely long (>~4s
-        # after the first), so it never machine-guns.
+    async def _play_flow(self):
+        tiers = list(self._active_flow())
+        # tier 0: sometimes swap in a shorter generic quick-stall for variety — both are
+        # safe openers. tiers 1-2 stay flow-specific (the domain reassurance/close-out).
+        if self._quick and tiers and random.random() < 0.5:
+            tiers = [self._pick_quick()] + tiers[1:]
         await asyncio.sleep(self._delay)
-        await self._play_one()
-        # Only if Gemini is still silent well after the first ack, reassure once more.
-        await asyncio.sleep(self._second_after)
-        await self._play_one()
+        for pcm, dur in tiers:
+            await self._play_one(pcm)
+            # Let the clip actually play out before considering the next tier, so a fast
+            # real answer cancels us mid-gap instead of after a second clip is queued.
+            await asyncio.sleep(dur + self._gap)
 
-    async def _play_one(self):
-        choices = [i for i in range(len(self._clips)) if i != self._last_clip]
-        self._last_clip = random.choice(choices) if choices else 0
-        pcm = self._clips[self._last_clip]
+    def _pick_quick(self) -> tuple[bytes, float]:
+        choices = [i for i in range(len(self._quick)) if i != self._last_quick] or [0]
+        self._last_quick = random.choice(choices)
+        return self._quick[self._last_quick]
+
+    async def _play_one(self, pcm: bytes):
         chunk = int(self._sample_rate * 2 * 0.2)  # 200ms chunks so barge-in clears fast
         for i in range(0, len(pcm), chunk):
             await self.push_frame(
@@ -198,7 +257,14 @@ async def run_bot(
             add_wav_header=False,
             # stop_secs: end-of-turn wait; start_secs 0.2->0.12 so barge-in
             # (interruption broadcast + Twilio buffer clear) fires near-instantly.
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.4, start_secs=0.12)),
+            # stop_secs 0.4->0.3 shaves 100ms off EVERY turn; raise via VAD_STOP_SECS
+            # if it starts cutting off slow/pausing speakers.
+            vad_analyzer=SileroVADAnalyzer(
+                params=VADParams(
+                    stop_secs=float(os.getenv("VAD_STOP_SECS", "0.3")),
+                    start_secs=0.12,
+                )
+            ),
             serializer=serializer,
         ),
     )
@@ -247,14 +313,19 @@ async def run_bot(
             # tele-caller needs speed over deliberation.
             thinking=ThinkingConfig(thinking_budget=0),
             # Latency fix: without this, Gemini Live reprocesses the ENTIRE growing
-            # audio conversation every turn — measured TTFB climbed 1s -> 14s over a
-            # call. Compression keeps the reprocessed window small so latency stays flat.
+            # audio conversation every turn — measured TTFB climbed 1s -> 34s over 6
+            # turns. Compression should cap the reprocessed window so latency stays flat.
             # NOTE: pipecat expects a plain dict here (it calls .get() on it), NOT the
             # ContextWindowCompressionParams object.
-            # trigger_tokens LOW + aggressive: measured TTFB climbed 0.7->14s over 5
-            # turns at trigger=8000 (too late). 2500 compresses after ~2 turns so the
-            # reprocessed window — and thus latency — stays flat.
-            context_window_compression={"enabled": True, "trigger_tokens": 2500},
+            # trigger_tokens must be LOW enough to fire on a SHORT call: a turn is only
+            # ~400-450 audio tokens, so trigger=2500 didn't activate until ~turn 6 and
+            # the first 5 turns grew unbounded (1->17s). 1024 fires after ~2 turns so the
+            # window is capped early. If latency STILL climbs, native audio isn't honoring
+            # compression -> fall back to a periodic session reset (reconnect + re-seed).
+            context_window_compression={
+                "enabled": True,
+                "trigger_tokens": int(os.getenv("GEMINI_CWC_TRIGGER", "1024")),
+            },
         )
         if os.getenv("GEMINI_LIVE_MODEL"):
             settings_kwargs["model"] = os.getenv("GEMINI_LIVE_MODEL")
@@ -271,7 +342,15 @@ async def run_bot(
         llm = GoogleLLMService(
             api_key=os.getenv("GOOGLE_API_KEY"),
             model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-            params=GoogleLLMService.InputParams(temperature=0.4),
+            # HARD CAP on output length. Default 4096 let the model dump a long "here are
+            # all the steps/documents" answer -> the Kannada block took 16s to synthesize
+            # (pipecat's sentence splitter doesn't chunk Kannada script, so the whole reply
+            # goes to TTS at once). A phone turn is 1-2 short sentences (~40-80 tokens);
+            # 160 keeps replies short so TTS stays ~1s. Prompt also tells it to chunk lists.
+            params=GoogleLLMService.InputParams(
+                temperature=0.4,
+                max_tokens=int(os.getenv("GEMINI_MAX_TOKENS", "160")),
+            ),
         )
         if voice_engine == "hybrid":
             from pipecat.services.google.tts import GeminiTTSService
@@ -279,11 +358,25 @@ async def run_bot(
             # location must be a real regional prefix or omitted. Pipecat builds
             # "{location}-texttospeech.googleapis.com"; "global" -> 404. Leave it unset
             # to use the default endpoint (verified working at 0.94s first-byte).
+            # Delivery/tone lives in the TTS `prompt` (natural-language style steering),
+            # NOT the system prompt (that controls wording). Default steers Aoede away
+            # from the polished "news anchor" read toward relaxed phone-chat. Override
+            # via GEMINI_TTS_PROMPT to retune the vibe without code edits.
+            tts_style = os.getenv(
+                "GEMINI_TTS_PROMPT",
+                "Speak like a real, natural tele-caller on a live customer phone call — a "
+                "warm, friendly, confident Bangalore call-center agent. Conversational and "
+                "human, clear and easy to follow, with a relaxed natural pace and normal "
+                "everyday intonation. Polite and genuinely engaged with the person, like you "
+                "actually mean it. NOT reading a script, NOT a formal news anchor or "
+                "announcer, not over-enunciated, not dramatic.",
+            )
             tts = GeminiTTSService(
                 credentials_path=str(BASE_DIR / os.getenv("GCP_KEY_PATH", "gcp-key.json")),
                 location=os.getenv("GCP_LOCATION") or None,
                 voice_id=os.getenv("GEMINI_VOICE", "Aoede"),
                 model="gemini-2.5-flash-tts",  # outputs 24kHz; pipeline downsamples to 8kHz
+                params=GeminiTTSService.InputParams(prompt=tts_style),
             )
         else:
             # .env is authoritative for the voice — a stale dashboard campaign value can
@@ -364,11 +457,24 @@ async def run_bot(
     # Captures both sides of the conversation and streams it to the demo dashboard.
     transcript = TranscriptProcessor()
 
-    # One prompt, meaningful acknowledgment per turn (fires ~0.9s after you stop); a
-    # second reassurance only if Gemini is still silent 4s later. No machine-gun chaining.
-    # FILLERS_ENABLED=false disables them entirely (empty clip list -> inert pass-through).
-    filler_clips = [] if os.getenv("FILLERS_ENABLED", "true").lower() == "false" else load_filler_clips()
-    filler = FillerInjector(clips=filler_clips, delay=0.9, second_after=4.0)
+    # Tiered "please hold" flow that covers up to ~7-10s of Gemini slow-TTFB: an ack at
+    # ~1.1s, mid-wait reassurance at ~4s, close-out at ~7.5s — each tier plays out fully
+    # before the next, cancelled the instant the real answer arrives. FILLER_FLOW picks
+    # the domain (account|transaction|loan|universal); universal is the safe default.
+    # FILLERS_ENABLED=false disables them entirely (empty flows -> inert pass-through).
+    if os.getenv("FILLERS_ENABLED", "true").lower() == "false":
+        filler_flows, filler_quick = {}, []
+    else:
+        filler_flows, filler_quick = load_filler_flows()
+    flow_name = (campaign or {}).get("FILLER_FLOW") or os.getenv("FILLER_FLOW", "universal")
+    # delay = how long a turn must stall before the filler fires. Keep it above a normal
+    # snappy turn so it only covers genuinely slow ones (env FILLER_DELAY).
+    filler = FillerInjector(
+        filler_flows, filler_quick, flow_name=flow_name,
+        delay=float(os.getenv("FILLER_DELAY", "1.3")),
+        # Only long/complex questions (caller spoke >= this many seconds) earn a filler.
+        min_query_secs=float(os.getenv("FILLER_MIN_QUERY_SECS", "2.5")),
+    )
 
     if voice_engine == "gemini-direct":
         # Raw audio -> Gemini Live -> raw audio. The aggregator MUST be in the path (it
@@ -391,7 +497,8 @@ async def run_bot(
             llm,                    # Gemini brain (text->text, or text->audio in Live mode)
         ]
         if tts is not None:
-            stages.append(tts)      # text -> speech (Sarvam Bulbul) — sarvam mode only
+            stages.append(tts)      # text -> speech (Sarvam Bulbul / Gemini Cloud TTS)
+            stages.append(filler)   # cover slow TTS turns with a spoken "one minute sir"
         else:
             stages.append(filler)   # gemini mode: cover slow Live TTFB turns
         stages += [

@@ -1,97 +1,114 @@
 """
-Generate short English-but-Indian-accent filler/backchannel clips for the tele-caller.
+Generate the "please hold" filler clips for the tele-caller — via Google Cloud TTS
+(the same Aoede voice + service account the hybrid pipeline uses). Reliable, unlike the
+old AI Studio free-tier path (which throttled to ~1-in-5 success).
 
-These play while Gemini is (occasionally) slow to respond, so they must sound like the
-SAME warm Bangalore agent — English words ("hmm", "okay", "alright") in a natural Indian
-accent, never foreign. Generated with Gemini TTS using the Aoede voice (the same voice
-family the Live agent speaks with) and an accent-steering instruction.
+Current design (kept deliberately simple per request): NO "hmm/haan" backchannels — just
+short, natural "okay, one minute sir" hold phrases in the agent's own voice, played when a
+turn stalls. These load into bot.py's FillerInjector as the "universal" flow.
 
-Output: 8kHz mono 16-bit PCM wav (Twilio format) in assets/fillers/.
+Output: 8kHz mono 16-bit PCM wav (Twilio format) in assets/fillers/, named
+"{flow}_{tier}.wav". Old *.wav are cleared first.
 
 Run:  python generate_fillers.py
 """
 
+import asyncio
 import audioop
 import os
 import wave
 from pathlib import Path
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from google.cloud import texttospeech_v1
+from google.oauth2 import service_account
 
 load_dotenv()
 
-FILLERS_DIR = Path(__file__).parent / "assets" / "fillers"
+BASE_DIR = Path(__file__).parent
+FILLERS_DIR = BASE_DIR / "assets" / "fillers"
+KEY_PATH = str(BASE_DIR / os.getenv("GCP_KEY_PATH", "gcp-key.json"))
 VOICE = os.getenv("GEMINI_VOICE", "Aoede")
+TTS_MODEL = "gemini-2.5-flash-tts"
 
-# name -> NEUTRAL acknowledgment sounds a person naturally makes while starting to answer.
-# NOT "let me check / hold on / looking it up" — the agent never looks anything up, every
-# answer comes straight from it, so a lookup filler is wrong (e.g. for "which bank are you
-# from?"). These are just warm human backchannels that fit ANY reply. Keep SHORT.
-FILLERS = {
-    "haan": "ಹಾಂ...",
-    "haan_sir": "ಹಾಂ ಸರ್...",
-    "hmm": "ಹ್ಮ್ಂ...",
-    "haan_haan": "ಹಾಂ ಹಾಂ...",
-    "howdu_sir": "ಹೌದು ಸರ್...",
-    "sari_sir": "ಸರಿ ಸರ್...",
+# MEANINGFUL acknowledgments — these fire only after a LONG/complex question (gated in
+# bot.py by how long the caller spoke), so they should sound like Kavya genuinely taking
+# in the request and going to check, NOT a canned "hold please". tier 0 fires first;
+# 1 and 2 are follow-ups only if the wait keeps going.
+FILLER_FLOWS = {
+    "universal": [
+        "Haan sir, adanna check maadi heltini.",       # yes sir, let me check that and tell you
+        "Sari, ondu sec — adanna nodta iddini.",        # okay, one sec, I'm looking at that
+        "Ahaan, artha aaytu sir, ondu nimisha.",        # ah, understood sir, one minute
+    ],
 }
 
 STYLE = (
-    "Speak this as a warm Bengaluru Kannada tele-caller making a short, natural "
-    "acknowledgement sound as you begin to answer — like a soft 'mm-hmm' / 'yeah'. "
-    "Relaxed, brief, thinking-aloud, NOT enthusiastic. Kannada: "
+    "Say this the way a warm, natural Bangalore tele-caller reacts when a customer asks a "
+    "real question — like you just took in what they said and you're about to check it for "
+    "them. Casual, engaged, reassuring, a little thoughtful. NOT a scripted 'hold please', "
+    "not formal, not an announcer. Kannada+English code-mix, natural Indian accent."
 )
 
 
-def main():
-    FILLERS_DIR.mkdir(parents=True, exist_ok=True)
-    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+async def synth(client, text: str) -> bytes:
+    """Cloud TTS -> 8kHz mono PCM for one phrase (Aoede voice, casual style)."""
+    voice = texttospeech_v1.VoiceSelectionParams(
+        language_code="en-US", name=VOICE, model_name=TTS_MODEL
+    )
+    scfg = texttospeech_v1.StreamingSynthesizeConfig(
+        voice=voice,
+        streaming_audio_config=texttospeech_v1.StreamingAudioConfig(
+            audio_encoding=texttospeech_v1.AudioEncoding.PCM,
+            sample_rate_hertz=24000,
+        ),
+    )
 
-    import time
+    async def reqs():
+        yield texttospeech_v1.StreamingSynthesizeRequest(streaming_config=scfg)
+        yield texttospeech_v1.StreamingSynthesizeRequest(
+            input=texttospeech_v1.StreamingSynthesisInput(text=text, prompt=STYLE)
+        )
+
+    pcm24 = b""
+    async for r in await client.streaming_synthesize(reqs()):
+        pcm24 += r.audio_content
+    pcm8, _ = audioop.ratecv(pcm24, 2, 1, 24000, 8000, None)  # 24kHz -> 8kHz Twilio
+    return pcm8
+
+
+def write_wav(name: str, pcm8: bytes):
+    path = FILLERS_DIR / f"{name}.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8000)
+        w.writeframes(pcm8)
+    print(f"  ✓ {name:14s} '{pcm8 and ''}' -> {path.name}  ({len(pcm8)/16000:.2f}s)")
+
+
+async def main():
+    FILLERS_DIR.mkdir(parents=True, exist_ok=True)
+    for old in FILLERS_DIR.glob("*.wav"):  # clear stale clips so nothing outdated loads
+        old.unlink()
+
+    creds = service_account.Credentials.from_service_account_file(KEY_PATH)
+    client = texttospeech_v1.TextToSpeechAsyncClient(credentials=creds)
 
     ok = 0
-    for name, word in FILLERS.items():
-        pcm24 = None
-        for attempt in range(3):
+    total = 0
+    for flow, tiers in FILLER_FLOWS.items():
+        for i, phrase in enumerate(tiers):
+            total += 1
             try:
-                r = client.models.generate_content(
-                    model="gemini-2.5-flash-preview-tts",
-                    contents=STYLE + word,
-                    config=types.GenerateContentConfig(
-                        response_modalities=["AUDIO"],
-                        speech_config=types.SpeechConfig(
-                            voice_config=types.VoiceConfig(
-                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE)
-                            )
-                        ),
-                    ),
-                )
-                cand = r.candidates[0] if r.candidates else None
-                if cand and cand.content and cand.content.parts:
-                    pcm24 = cand.content.parts[0].inline_data.data
-                    break
+                pcm8 = await synth(client, phrase)
+                write_wav(f"{flow}_{i}", pcm8)
+                ok += 1
             except Exception as e:
-                print(f"    {name} attempt {attempt+1} error: {str(e)[:80]}")
-            time.sleep(1.5)
+                print(f"  ✗ {flow}_{i} '{phrase}' -> {type(e).__name__}: {str(e)[:120]}")
 
-        if not pcm24:
-            print(f"  ✗ {name:12s} '{word}' -> FAILED after retries, skipping")
-            continue
-
-        pcm8, _ = audioop.ratecv(pcm24, 2, 1, 24000, 8000, None)   # -> 8kHz for Twilio
-        path = FILLERS_DIR / f"{name}.wav"
-        with wave.open(str(path), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(8000)
-            w.writeframes(pcm8)
-        ok += 1
-        print(f"  ✓ {name:12s} '{word}' -> {path.name}  ({len(pcm8)/16000:.2f}s)")
-
-    print(f"\nDone. {ok}/{len(FILLERS)} clips in {FILLERS_DIR}")
+    print(f"\nDone. {ok}/{total} clips in {FILLERS_DIR}")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

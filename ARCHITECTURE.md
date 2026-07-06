@@ -63,7 +63,7 @@ Kept for voice-character control (pick a Sarvam speaker) and as a fully-cascaded
 | TTS (sarvam mode) | **Sarvam Bulbul** (`bulbul:v3`, speaker `kavya`) | India-native voices. |
 | Text LLM (sarvam mode) | **Gemini 2.5 Flash** | temp 0.4. |
 | Dialect brain | System prompt + lexicon (in-context, not RAG) | See §5. |
-| Latency masking | **Filler injector** | Plays a short Indian-English "hmm/okay/alright" if a turn stalls >1.2 s. |
+| Latency masking | **Filler injector** | Tiered "please hold" flow (ack ~1.1 s → reassure ~4 s → close-out ~7.5 s) covering slow Gemini turns; flow picked by `FILLER_FLOW` (account/transaction/loan/universal). |
 | Demo UI | **FastAPI** + static dashboard | Context editor, live status, transcript stream. |
 
 ---
