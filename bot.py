@@ -89,14 +89,14 @@ class FillerInjector(FrameProcessor):
     def __init__(
         self,
         clips: list[bytes],
-        delay: float = 1.4,
-        gap: float = 1.1,
+        delay: float = 0.9,
+        second_after: float = 4.0,
         sample_rate: int = 8000,
     ):
         super().__init__()
         self._clips = clips
-        self._delay = delay          # silence before the FIRST filler
-        self._gap = gap              # silence between chained fillers
+        self._delay = delay              # fire the ack promptly ("pat pat") after user stops
+        self._second_after = second_after  # only reassure again if still waiting this long
         self._sample_rate = sample_rate
         self._filler_task = None
         self._last_clip = -1
@@ -118,20 +118,27 @@ class FillerInjector(FrameProcessor):
             await self.cancel_task(task)
 
     async def _play_fillers(self):
-        # Keep filling until the real answer arrives (which cancels this task).
+        # ONE meaningful acknowledgment, fired promptly — like a human saying "ondu
+        # nimisha sir, check maadtini" once, then waiting. NO chaining (that spammed).
+        # A second, longer hold phrase only fires if the wait is genuinely long (>~4s
+        # after the first), so it never machine-guns.
         await asyncio.sleep(self._delay)
-        while True:
-            choices = [i for i in range(len(self._clips)) if i != self._last_clip]
-            self._last_clip = random.choice(choices) if choices else 0
-            pcm = self._clips[self._last_clip]
-            chunk = int(self._sample_rate * 2 * 0.2)  # 200ms chunks so barge-in clears fast
-            for i in range(0, len(pcm), chunk):
-                await self.push_frame(
-                    TTSAudioRawFrame(
-                        audio=pcm[i : i + chunk], sample_rate=self._sample_rate, num_channels=1
-                    )
+        await self._play_one()
+        # Only if Gemini is still silent well after the first ack, reassure once more.
+        await asyncio.sleep(self._second_after)
+        await self._play_one()
+
+    async def _play_one(self):
+        choices = [i for i in range(len(self._clips)) if i != self._last_clip]
+        self._last_clip = random.choice(choices) if choices else 0
+        pcm = self._clips[self._last_clip]
+        chunk = int(self._sample_rate * 2 * 0.2)  # 200ms chunks so barge-in clears fast
+        for i in range(0, len(pcm), chunk):
+            await self.push_frame(
+                TTSAudioRawFrame(
+                    audio=pcm[i : i + chunk], sample_rate=self._sample_rate, num_channels=1
                 )
-            await asyncio.sleep(self._gap)  # natural pause before the next acknowledgment
+            )
 
 
 def build_system_instruction(campaign: dict | None = None) -> str:
@@ -352,9 +359,9 @@ async def run_bot(
     # Captures both sides of the conversation and streams it to the demo dashboard.
     transcript = TranscriptProcessor()
 
-    # delay=1.4: fast turns (<1.4s) get the real answer with no filler; slower turns get
-    # a chain of acknowledgments (gap=1.1s between them) covering the whole thinking time.
-    filler = FillerInjector(clips=load_filler_clips(), delay=1.4, gap=1.1)
+    # One prompt, meaningful acknowledgment per turn (fires ~0.9s after you stop); a
+    # second reassurance only if Gemini is still silent 4s later. No machine-gun chaining.
+    filler = FillerInjector(clips=load_filler_clips(), delay=0.9, second_after=4.0)
 
     if voice_engine == "gemini-direct":
         # Raw audio -> Gemini Live -> raw audio. The aggregator MUST be in the path (it
