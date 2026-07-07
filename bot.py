@@ -362,14 +362,18 @@ async def run_bot(
             # NOT the system prompt (that controls wording). Default steers Aoede away
             # from the polished "news anchor" read toward relaxed phone-chat. Override
             # via GEMINI_TTS_PROMPT to retune the vibe without code edits.
+            # NOTE: Gemini voices have no numeric speaking_rate (Chirp/Journey only) —
+            # pace is steered by wording here. "relaxed pace" made it audibly SLOW;
+            # ask for normal brisk phone speed explicitly.
             tts_style = os.getenv(
                 "GEMINI_TTS_PROMPT",
                 "Speak like a real, natural tele-caller on a live customer phone call — a "
-                "warm, friendly, confident Bangalore call-center agent. Conversational and "
-                "human, clear and easy to follow, with a relaxed natural pace and normal "
-                "everyday intonation. Polite and genuinely engaged with the person, like you "
-                "actually mean it. NOT reading a script, NOT a formal news anchor or "
-                "announcer, not over-enunciated, not dramatic.",
+                "warm, friendly, confident Bangalore call-center agent. Speak at a NORMAL, "
+                "energetic phone-conversation speed — the brisk pace of a busy call-center "
+                "agent, never slow, never dragging, no long pauses between words. "
+                "Conversational and human, normal everyday intonation, polite and genuinely "
+                "engaged. NOT reading a script, NOT a formal news anchor or announcer, not "
+                "over-enunciated, not dramatic.",
             )
             tts = GeminiTTSService(
                 credentials_path=str(BASE_DIR / os.getenv("GCP_KEY_PATH", "gcp-key.json")),
@@ -489,13 +493,31 @@ async def run_bot(
             aggregator.assistant(), # context bookkeeping
         ])
     else:
+        # Predictive answer cache (hybrid/sarvam only): while the customer is speaking,
+        # a background flash-lite call pre-writes answers to their most likely next
+        # questions; a semantic hit skips the live LLM turn (~1-1.5s faster). Miss =
+        # normal path. Tune from logs: grep PREDICT logs/call_debug.log
         stages = [
             transport.input(),      # Twilio -> frames
             stt,                    # speech -> text (Kannada/Kanglish)
             transcript.user(),      # capture customer turn
             aggregator.user(),      # add user turn to context
-            llm,                    # Gemini brain (text->text, or text->audio in Live mode)
         ]
+        if voice_engine in ("hybrid", "sarvam") and os.getenv(
+            "PREDICTIVE_CACHE", "true"
+        ).lower() != "false":
+            from predictive_cache import PredictiveCache
+
+            stages.append(
+                PredictiveCache(
+                    context=context,
+                    api_key=os.getenv("GOOGLE_API_KEY"),
+                    campaign=campaign,
+                    model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+                    threshold=float(os.getenv("PREDICT_THRESHOLD", "0.80")),
+                )
+            )
+        stages.append(llm)          # Gemini brain (only runs on cache misses)
         if tts is not None:
             stages.append(tts)      # text -> speech (Sarvam Bulbul / Gemini Cloud TTS)
             stages.append(filler)   # cover slow TTS turns with a spoken "one minute sir"
