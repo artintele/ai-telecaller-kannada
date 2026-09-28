@@ -12,3 +12,7 @@ logs/
 gcp-key.json*
 *.gcp.json
 service-account*.json
+
+# Workload Identity Federation config (not a secret, but deployment-specific)
+gcp-wif.json
+voice-samples/

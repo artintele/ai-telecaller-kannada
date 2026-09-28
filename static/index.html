@@ -111,7 +111,11 @@
         </div>
         <div>
           <label>Model</label>
-          <select id="model"><option>bulbul:v2</option><option>bulbul:v3</option></select>
+          <select id="model"><option>bulbul:v3</option><option>bulbul:v2</option></select>
+        </div>
+        <div>
+          <label>Call language</label>
+          <select id="lang"><option value="en">English</option><option value="kn">Kannada (Kanglish)</option></select>
         </div>
       </div>
 
@@ -166,6 +170,7 @@ function collectCampaign(){
     DO_NOT_SAY: $("dns").value.trim(),
     SARVAM_TTS_SPEAKER: $("speaker").value,
     SARVAM_TTS_MODEL: $("model").value,
+    CALL_LANGUAGE: $("lang").value,
     CUSTOMER: { name: $("custName").value.trim() || "sir/madam", phone: $("custPhone").value.trim() }
   };
 }
@@ -193,6 +198,7 @@ async function placeCall(){
     const c = d.campaign || {};
     $("goal").value = c.GOAL||""; $("offer").value = c.OFFER||"";
     $("facts").value = (c.KEY_FACTS||[]).join("\n"); $("dns").value = c.DO_NOT_SAY||"";
+    if(c.CALL_LANGUAGE) $("lang").value = c.CALL_LANGUAGE;
     if(c.CUSTOMER){ $("custName").value = c.CUSTOMER.name||""; $("custPhone").value = c.CUSTOMER.phone||""; }
     setStatus(d.status||"idle");
   }catch(e){}
