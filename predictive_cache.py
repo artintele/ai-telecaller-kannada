@@ -38,6 +38,7 @@ from pipecat.frames.frames import (
     LLMFullResponseStartFrame,
     LLMTextFrame,
 )
+from pipecat.frames.frames import LLMContextFrame
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContextFrame
 from pipecat.processors.frame_processor import FrameProcessor
 
@@ -48,13 +49,7 @@ PREDICT_PROMPT = """You are the anticipation brain of "Kavya", a Bengaluru Kangl
 Given the conversation so far, predict the {n} most likely things the CUSTOMER will say next,
 and pre-write Kavya's answer for each.
 
-Rules for predicted customer utterances ("q"):
-- Write them the way Sarvam STT would transcribe spoken Kannada: Kannada script, casual, short.
-- Cover distinct likely directions (e.g. a detail question, an objection, an acceptance).
-
-Rules for answers ("a") — must be indistinguishable from Kavya's real replies:
-- Casual Bengaluru Kanglish in KANNADA SCRIPT (English words transliterated, e.g. ಆಫರ್, ಡಾಕ್ಯುಮೆಂಟ್ಸ್),
-  matching the agent's style in the conversation below.
+{style}
 - SHORT: 1-2 spoken sentences, ~12-25 words. One idea, then hand the turn back.
 - Only use facts from the conversation/campaign below. NEVER invent prices, dates or details.
 
@@ -74,6 +69,30 @@ def _cos(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+STYLE = {
+    "kn": """Rules for predicted customer utterances ("q"):
+- Write them the way Sarvam STT would transcribe spoken Kannada: Kannada script, casual, short.
+- Cover distinct likely directions (e.g. a detail question, an objection, an acceptance).
+
+Rules for answers ("a") — must be indistinguishable from Kavya's real replies:
+- Casual Bengaluru Kanglish in KANNADA SCRIPT (English words transliterated, e.g. ಆಫರ್, ಡಾಕ್ಯುಮೆಂಟ್ಸ್),
+  matching the agent's style in the conversation below.""",
+    "en": """Rules for predicted customer utterances ("q"):
+- Short, casual spoken Indian English, the way a phone transcript reads.
+- Cover distinct likely directions (e.g. a detail question, an objection, an acceptance).
+
+Rules for answers ("a") — must be indistinguishable from Kavya's real replies:
+- Natural, friendly Indian English, numbers written as words, no markdown,
+  matching the agent's style in the conversation below.""",
+}
+
+
+def _dict_messages(context) -> list[dict]:
+    # Universal LLMContext also holds LLMSpecificMessage objects (e.g. Gemini 3 thought
+    # signatures) — only plain dict messages carry role/content.
+    return [m for m in context.messages if isinstance(m, dict)]
+
+
 class PredictiveCache(FrameProcessor):
     """Anticipates the customer's next question during their speaking time."""
 
@@ -82,6 +101,7 @@ class PredictiveCache(FrameProcessor):
         context,                    # OpenAILLMContext — read-only, for trajectory
         api_key: str,
         campaign: dict | None = None,
+        language: str = "kn",
         model: str = "gemini-3.1-flash-lite",
         n_predictions: int = 3,
         threshold: float = 0.80,
@@ -90,6 +110,7 @@ class PredictiveCache(FrameProcessor):
         super().__init__()
         self._context = context
         self._campaign = campaign or {}
+        self._style = STYLE.get(language, STYLE["kn"])
         self._model = model
         self._n = n_predictions
         self._threshold = threshold
@@ -119,7 +140,7 @@ class PredictiveCache(FrameProcessor):
             # speaking time to pre-generate likely answers.
             await self._cancel_predict()
             self._predict_task = self.create_task(self._predict())
-        elif isinstance(frame, OpenAILLMContextFrame):
+        elif isinstance(frame, (OpenAILLMContextFrame, LLMContextFrame)):
             # A user turn is about to run the LLM. Try the cache first.
             answer = await self._match(frame)
             if answer is not None:
@@ -137,7 +158,7 @@ class PredictiveCache(FrameProcessor):
             await self.cancel_task(task)
 
     def _convo_tail(self, max_msgs: int = 8) -> list[dict]:
-        msgs = [m for m in self._context.messages if m.get("role") in ("user", "assistant")]
+        msgs = [m for m in _dict_messages(self._context) if m.get("role") in ("user", "assistant")]
         return msgs[-max_msgs:]
 
     async def _predict(self):
@@ -154,6 +175,7 @@ class PredictiveCache(FrameProcessor):
 
             prompt = PREDICT_PROMPT.format(
                 n=self._n,
+                style=self._style,
                 campaign=json.dumps(self._campaign, ensure_ascii=False),
                 convo=convo,
             )
@@ -182,11 +204,11 @@ class PredictiveCache(FrameProcessor):
         except Exception as e:
             logger.warning(f"PREDICT generation failed (harmless, falls back to LLM): {e}")
 
-    async def _match(self, frame: OpenAILLMContextFrame) -> str | None:
+    async def _match(self, frame) -> str | None:
         if not self._predictions:
             return None
         try:
-            msgs = frame.context.messages
+            msgs = _dict_messages(frame.context)
             last = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
             query = last.get("content") if last else None
             if not isinstance(query, str) or not query.strip():

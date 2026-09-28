@@ -14,13 +14,15 @@ Run:  uvicorn server:app --host 0.0.0.0 --port 8000
 Then: ngrok http 8000  (put the https host in PUBLIC_HOST in .env)
 """
 
+import base64
 import json
 import os
+import secrets
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from twilio.rest import Client
 
 from app_state import hub
@@ -30,6 +32,29 @@ load_dotenv()
 
 app = FastAPI()
 STATIC_DIR = Path(__file__).parent / "static"
+
+# The dashboard can place real, billed calls to any number, so on a public host it
+# must not be open. HTTP Basic on everything EXCEPT the paths the telephony provider
+# itself hits (/ws media stream, /twiml) and /health. Browsers resend Basic creds on
+# the same-origin /events websocket, so the live transcript keeps working.
+DASHBOARD_USER = os.getenv("DASHBOARD_USER", "")
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+_OPEN_PATHS = {"/ws", "/twiml", "/health"}
+
+
+@app.middleware("http")
+async def require_dashboard_login(request: Request, call_next):
+    if not DASHBOARD_PASSWORD or request.url.path in _OPEN_PATHS:
+        return await call_next(request)
+    header = request.headers.get("authorization", "")
+    if header.startswith("Basic "):
+        try:
+            user, _, pwd = base64.b64decode(header[6:]).decode().partition(":")
+        except Exception:
+            user, pwd = "", ""
+        if secrets.compare_digest(user, DASHBOARD_USER) and secrets.compare_digest(pwd, DASHBOARD_PASSWORD):
+            return await call_next(request)
+    return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="telecaller"'})
 
 PUBLIC_HOST = os.getenv("PUBLIC_HOST", "").replace("https://", "").replace("http://", "").rstrip("/")
 
@@ -55,6 +80,9 @@ async def set_campaign(request: Request):
 
 @app.post("/api/call")
 async def start_call(request: Request):
+    # The dashboard's "Call now" posts here; route to whichever provider is live.
+    if os.getenv("TELEPHONY_PROVIDER", "twilio").lower() == "exotel":
+        return await start_call_exotel(request)
     body = await request.json()
     to_number = body.get("to") or hub.campaign.get("CUSTOMER", {}).get("phone")
     if not to_number:
@@ -106,23 +134,21 @@ async def media_stream(websocket: WebSocket):
     await websocket.accept()
     iterator = websocket.iter_text()
 
-    # Auto-detect Twilio vs Exotel from the first frame(s).
-    #   Twilio:  {"event":"connected"} then {"event":"start","start":{"streamSid","callSid"}}
-    #   Exotel:  {"event":"start","start":{"stream_sid","call_sid"}}   (snake_case, PCM 8k)
-    first = json.loads(await iterator.__anext__())
-    if first.get("event") == "connected":  # Twilio sends this first
-        start_msg = json.loads(await iterator.__anext__())
-        provider = "twilio"
-        stream_sid = start_msg["start"]["streamSid"]
-        call_sid = start_msg["start"]["callSid"]
-    elif first.get("event") == "start" and "stream_sid" in first.get("start", {}):
+    # Both Twilio and Exotel may open with {"event":"connected"}; skip anything until
+    # "start". Twilio's start carries camelCase streamSid/callSid, Exotel's snake_case
+    # stream_sid/call_sid (Exotel streams 8kHz PCM, Twilio 8kHz mu-law).
+    msg = json.loads(await iterator.__anext__())
+    while msg.get("event") != "start":
+        msg = json.loads(await iterator.__anext__())
+    start = msg.get("start", {})
+    if "stream_sid" in start or "stream_sid" in msg:
         provider = "exotel"
-        stream_sid = first["start"]["stream_sid"]
-        call_sid = first["start"].get("call_sid")
-    else:  # fall back to Twilio-style start
+        stream_sid = start.get("stream_sid") or msg.get("stream_sid")
+        call_sid = start.get("call_sid")
+    else:
         provider = "twilio"
-        stream_sid = first["start"]["streamSid"]
-        call_sid = first["start"]["callSid"]
+        stream_sid = start["streamSid"]
+        call_sid = start["callSid"]
 
     await run_bot(websocket, stream_sid, call_sid, campaign=dict(hub.campaign), provider=provider)
 

@@ -8,6 +8,8 @@ A production-oriented outbound/inbound phone agent that speaks **casual Bengalur
 configuration is **Gemini Live native audio** for the voice — it was judged (by ear, on live
 calls) to speak *better* Bangalore Kannada than the India-specialised Sarvam TTS.
 
+> **Superseded for the default path (28 Sep 2026):** production now runs the `sarvam` cascade with Exotel, Gemini 3.1 Flash-Lite and Google Chirp 3 HD Aoede — see "Current production stack" in README.md for the measured cost/latency comparison. The Gemini-Live material below still describes `VOICE_ENGINE=gemini-direct`.
+
 ---
 
 ## 1. TL;DR

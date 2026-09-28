@@ -10,6 +10,31 @@ Caller ⇄ Twilio PSTN ⇄ Media Stream (wss) ⇄ Pipecat
                         (kn-IN, code-mix)   (dialect prompt)   (kn-IN, locked speaker)
 ```
 
+## Current production stack (28 Sep 2026)
+
+```
+Caller ⇄ Exotel (Voicebot applet, wss) ⇄ Pipecat on EC2 (cloudflared tunnel)
+            │
+   Sarvam Saaras v3 STT → Gemini 3.1 Flash-Lite → Google Chirp 3 HD "Aoede" (streaming)
+   (gated: caller speech only)  (compact prompt)       (+ pre-recorded "Okay sir" acks)
+```
+
+Chosen after real Exotel test calls, all measured from the service's own per-call cost log:
+
+| Setup | Cost / min (all-in) | Caller stops → Kavya speaks |
+|---|---|---|
+| **Sarvam STT + Flash-Lite + Chirp 3 HD Aoede (default)** | **~Rs 2.5** | **~2.0 s** |
+| Same, with Gemini 3.8 Flash-Lite TTS voice (`TTS_PROVIDER=gemini-tts`) | ~Rs 1.7 | ~2.8 s |
+| Gemini Live 3.1 Flash (`VOICE_ENGINE=gemini-direct`) | ~Rs 3.2 | ~1.3 s |
+
+- Default campaign (`app_state.py`) is artintele.ai calling for itself; every fact is copied
+  from the live artintele.ai site, and the agent is told to say nothing beyond it.
+- `CALL_LANGUAGE=en|kn` switches prompt, STT and voice language (English default).
+- Every call logs `CALL COST ~Rs X ... | Gemini ... | TTS ... | Sarvam STT ... | Exotel ...`.
+- Google Cloud TTS authenticates keylessly via Workload Identity Federation from the EC2
+  instance role (the org blocks service-account keys) — see `.env.example`.
+- `generate_acks.py` must be re-run whenever the voice changes.
+
 ## Files
 | File | What it is |
 |---|---|
